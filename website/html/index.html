@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DepotTracker — Automatische Absicherung</title>
+  <link rel="stylesheet" href="../css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ───────── NAVBAR ───────── -->
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a href="#" class="navbar-brand">
+        <img src="../../logo/logo.png" alt="DepotTracker Logo" class="navbar-logo">
+        <span class="navbar-title">DepotTracker</span>
+      </a>
+      <ul class="navbar-links">
+        <li><a href="#dashboard">Dashboard</a></li>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#kontakt">Kontakt</a></li>
+      </ul>
+      <button class="navbar-toggle" aria-label="Menü öffnen">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ───────── HERO ───────── -->
+  <header class="hero" id="hero">
+    <div class="hero-glow"></div>
+    <div class="hero-content">
+      <p class="hero-tag">Krypto &amp; Aktien Monitoring</p>
+      <h1 class="hero-title">
+        DepotTracker<br>
+        <span class="hero-accent">Automatische Absicherung</span>
+      </h1>
+      <p class="hero-subtitle">
+        Überwacht Ihre Depots in Echtzeit. Erkennt Verluste ab 15&nbsp;% und generiert
+        vollautomatisch Schweizer QR-Rechnungen zum sofortigen Ausgleich.
+      </p>
+      <div class="hero-actions">
+        <a href="#dashboard" class="btn btn-primary">Dashboard ansehen</a>
+        <a href="#features" class="btn btn-ghost">Mehr erfahren</a>
+      </div>
+      <div class="hero-stats">
+        <div class="hero-stat">
+          <span class="hero-stat-value">CHF 248'390</span>
+          <span class="hero-stat-label">Überwachtes Volumen</span>
+        </div>
+        <div class="hero-stat">
+          <span class="hero-stat-value">3</span>
+          <span class="hero-stat-label">Aktive Depots</span>
+        </div>
+        <div class="hero-stat">
+          <span class="hero-stat-value">&lt; 2s</span>
+          <span class="hero-stat-label">Reaktionszeit</span>
+        </div>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <div class="hero-chart">
+        <svg viewBox="0 0 400 200" class="chart-svg">
+          <defs>
+            <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#00f0a0" stop-opacity="0.4"/>
+              <stop offset="100%" stop-color="#00f0a0" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="M0,160 C30,155 60,140 100,120 C140,100 160,80 200,90 C240,100 260,60 300,40 C340,20 370,30 400,10"
+                fill="none" stroke="#00f0a0" stroke-width="2.5" class="chart-line"/>
+          <path d="M0,160 C30,155 60,140 100,120 C140,100 160,80 200,90 C240,100 260,60 300,40 C340,20 370,30 400,10 L400,200 L0,200 Z"
+                fill="url(#chartGrad)" class="chart-area"/>
+        </svg>
+        <div class="chart-badge">+12.4 %</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ───────── DASHBOARD ───────── -->
+  <section class="dashboard" id="dashboard">
+    <div class="section-header">
+      <h2 class="section-title">Live Dashboard</h2>
+      <p class="section-subtitle">Echtzeitübersicht aller überwachten Positionen</p>
+    </div>
+
+    <div class="dashboard-grid">
+
+      <!-- Card 1 — Depotwert -->
+      <div class="card card-value">
+        <div class="card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>
+          </svg>
+        </div>
+        <p class="card-label">Aktueller Depotwert</p>
+        <h3 class="card-amount">CHF 248'390<span class="card-cents">.75</span></h3>
+        <div class="card-change positive">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
+            <path d="M10 3l7 7h-4v7H7v-7H3l7-7z"/>
+          </svg>
+          +CHF 12'450.20 (heute)
+        </div>
+        <div class="card-sparkline">
+          <svg viewBox="0 0 120 40">
+            <polyline points="0,35 10,30 20,28 30,25 40,27 50,20 60,22 70,15 80,18 90,10 100,12 110,8 120,5"
+                      fill="none" stroke="#00f0a0" stroke-width="2"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Card 2 — Verlust-Schwelle -->
+      <div class="card card-threshold">
+        <div class="card-icon icon-warning">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+          </svg>
+        </div>
+        <p class="card-label">Verlust-Schwelle</p>
+        <h3 class="card-amount threshold-value">15<span class="card-unit">%</span></h3>
+        <div class="threshold-bar">
+          <div class="threshold-fill" style="width: 62%"></div>
+          <div class="threshold-marker" style="left: 85%">
+            <span class="marker-label">Grenze</span>
+          </div>
+        </div>
+        <p class="card-detail">Aktueller Tagesverlust: <strong>−4.8 %</strong></p>
+        <div class="threshold-status safe">
+          <span class="status-dot"></span> Innerhalb der Toleranz
+        </div>
+      </div>
+
+      <!-- Card 3 — QR-Rechnung Alert -->
+      <div class="card card-alert">
+        <div class="alert-pulse"></div>
+        <div class="card-icon icon-alert">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+            <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="4" height="4"/>
+            <path d="M21 14h-3v7h7v-3h-4z"/>
+          </svg>
+        </div>
+        <div class="alert-badge">AUSGELÖST</div>
+        <p class="card-label">Schweizer QR-Rechnung</p>
+        <h3 class="card-amount alert-amount">CHF 37'258<span class="card-cents">.50</span></h3>
+        <div class="alert-details">
+          <div class="alert-row">
+            <span class="alert-key">Status</span>
+            <span class="alert-val alert-active">Generiert &amp; gesendet</span>
+          </div>
+          <div class="alert-row">
+            <span class="alert-key">Kanal</span>
+            <span class="alert-val"><svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8l-1.6 7.53c-.12.54-.44.67-.89.42l-2.45-1.8-1.18 1.14c-.13.13-.24.24-.5.24l.18-2.48 4.56-4.12c.2-.18-.04-.27-.3-.1L8.3 13.38l-2.38-.74c-.52-.16-.53-.52.1-.77l9.3-3.59c.43-.16.82.1.67.77z"/></svg> Telegram</span>
+          </div>
+          <div class="alert-row">
+            <span class="alert-key">Zeitstempel</span>
+            <span class="alert-val">13.04.2026, 14:32:08</span>
+          </div>
+          <div class="alert-row">
+            <span class="alert-key">Depot</span>
+            <span class="alert-val">Krypto-Portfolio #2</span>
+          </div>
+        </div>
+        <div class="alert-qr-preview">
+          <div class="qr-mock">
+            <div class="qr-grid">
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="qr-cross">+</div>
+          </div>
+          <p class="qr-caption">QR-Rechnung Vorschau</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ───────── FEATURES ───────── -->
+  <section class="features" id="features">
+    <div class="section-header">
+      <h2 class="section-title">Warum DepotTracker?</h2>
+      <p class="section-subtitle">Durchdacht. Automatisiert. Sicher.</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+        </div>
+        <h3>Echtzeit-Monitoring</h3>
+        <p>Permanente Überwachung aller Krypto- und Aktien-Positionen mit sofortiger Benachrichtigung.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+            <rect x="3" y="14" width="7" height="7"/><circle cx="17.5" cy="17.5" r="3.5"/>
+          </svg>
+        </div>
+        <h3>QR-Rechnungen (CH)</h3>
+        <p>Automatische Erstellung von Schweizer QR-Rechnungen nach ISO 20022 zum Ausgleich von Verlusten.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+          </svg>
+        </div>
+        <h3>Telegram-Alerts</h3>
+        <p>Sofortige Zustellung der QR-Rechnung und aller Warn-Benachrichtigungen via Telegram-Bot.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <h3>15 %-Schwelle</h3>
+        <p>Konfigurierbare Verlustgrenze mit intelligenter Berechnung und automatischem Trigger.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── FOOTER ───────── -->
+  <footer class="footer" id="kontakt">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <img src="../../logo/logo.png" alt="DepotTracker" class="footer-logo">
+        <p>DepotTracker — Schulprojekt 2026</p>
+      </div>
+      <div class="footer-links">
+        <a href="#">Datenschutz</a>
+        <a href="#">Impressum</a>
+        <a href="https://github.com" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ───────── MOBILE NAV SCRIPT ───────── -->
+  <script>
+    const toggle = document.querySelector('.navbar-toggle');
+    const links  = document.querySelector('.navbar-links');
+    toggle.addEventListener('click', () => {
+      links.classList.toggle('open');
+      toggle.classList.toggle('active');
+    });
+    document.querySelectorAll('.navbar-links a').forEach(a =>
+      a.addEventListener('click', () => {
+        links.classList.remove('open');
+        toggle.classList.remove('active');
+      })
+    );
+  </script>
+
+</body>
+</html>

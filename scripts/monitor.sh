@@ -2,220 +2,478 @@
 # =============================================================================
 # monitor.sh — Krypto-Depot-Monitor (Haupt-Skript)
 # =============================================================================
-# Dieses Skript:
-#   1) Ruft aktuelle Kryptokurse von der CoinGecko-API ab
-#   2) Berechnet den aktuellen Gesamtwert des Depots
-#   3) Vergleicht mit dem Startwert und schlägt ggf. Alarm
-#   4) Erzeugt bei Alarm eine Schweizer QR-Rechnung (Schritt 2)
-#   5) Sendet Rechnung + Warnmeldung per Telegram (Schritt 3)
+# Neue Features in dieser Version:
+#   • Intelligentes Caching (Datei-basiert, 60-Min-TTL)
+#   • Retry-Mechanismus für curl bei Netzwerkproblemen
+#   • Dynamischer Trailing Stop-Loss über Allzeithoch (ath.txt)
+#   • CSV-Historie in history.csv
+#   • E-Mail-Benachrichtigung mit QR-Rechnung als Anhang (statt Telegram)
+#   • Farbige Terminal-Ausgabe via ANSI-Codes
+#   • Throttling-Pausen zwischen Hauptschritten
 #
-# Aufruf:  ./monitor.sh
+# Aufruf: ./monitor.sh
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # BASH STRICT MODE — Fehler früh erkennen
-# -----------------------------------------------------------------------------
-# set -e  : Skript bricht ab, sobald ein Befehl fehlschlägt
-# set -u  : unbekannte Variablen führen zum Abbruch (Tippfehler-Schutz)
-# set -o pipefail : in einer Pipe zählt auch ein Fehler vor dem letzten Befehl
+#   -e             : Abbruch bei Fehler
+#   -u             : Abbruch bei unbekannter Variable
+#   -o pipefail    : Fehler in Pipes nicht schlucken
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
 # KONFIGURATION EINLESEN
 # -----------------------------------------------------------------------------
-# "source" lädt die Variablen aus config.sh in die aktuelle Shell.
-# $(dirname "$0") sorgt dafür, dass wir config.sh auch finden, wenn das
-# Skript aus einem anderen Verzeichnis aufgerufen wird.
-# -----------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=config.sh
 source "$SCRIPT_DIR/config.sh"
 
-# -----------------------------------------------------------------------------
-# HILFSFUNKTION: Logging mit Zeitstempel
-# -----------------------------------------------------------------------------
-# Gibt eine Nachricht mit Datum/Uhrzeit auf der Konsole aus.
-# Nützlich, um den Ablauf später nachvollziehen zu können.
-# -----------------------------------------------------------------------------
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-}
+# =============================================================================
+# HILFSFUNKTIONEN
+# =============================================================================
 
 # -----------------------------------------------------------------------------
-# HILFSFUNKTION: Prüfen, ob nötige Kommandos verfügbar sind
+# log — Farbige Ausgabe mit Zeitstempel
 # -----------------------------------------------------------------------------
-# Bricht mit Fehlermeldung ab, falls ein benötigtes Tool fehlt.
+# Erster Parameter: Level (INFO | SUCCESS | WARN | ERROR)
+# Restliche Parameter: die eigentliche Nachricht
+#
+# Beispiel:  log INFO "Rufe API ab..."
+#            log ERROR "Cache konnte nicht gelesen werden"
+#
+# "echo -e" aktiviert die Interpretation der Escape-Sequenzen (\033[...).
+# Fehler gehen bewusst nach stderr (>&2), damit sie sich z.B. beim
+# Weiterverarbeiten mit Pipes von normaler Ausgabe trennen lassen.
 # -----------------------------------------------------------------------------
-check_dependencies() {
-    local missing=0
-    for cmd in curl jq bc python3; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            echo "FEHLER: '$cmd' ist nicht installiert." >&2
-            missing=1
-        fi
-    done
-    if [[ $missing -eq 1 ]]; then
-        echo "Bitte installiert die fehlenden Pakete (siehe README)." >&2
-        exit 1
+log() {
+    local level="$1"; shift
+    local message="$*"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    local color
+    case "$level" in
+        INFO)    color="$COLOR_INFO"    ;;
+        SUCCESS) color="$COLOR_SUCCESS" ;;
+        WARN)    color="$COLOR_WARN"    ;;
+        ERROR)   color="$COLOR_ERROR"   ;;
+        *)       color="$COLOR_INFO"    ;;
+    esac
+
+    # Format: [Zeit] [LEVEL] Nachricht — alles in der passenden Farbe.
+    if [[ "$level" == "ERROR" ]]; then
+        echo -e "${color}[${timestamp}] [${level}] ${message}${COLOR_RESET}" >&2
+    else
+        echo -e "${color}[${timestamp}] [${level}] ${message}${COLOR_RESET}"
     fi
 }
 
 # -----------------------------------------------------------------------------
-# FUNKTION: Kurse von CoinGecko abrufen
+# check_dependencies — Prüft, ob alle Kommandozeilen-Tools verfügbar sind
 # -----------------------------------------------------------------------------
-# CoinGecko-Endpoint "simple/price" liefert für eine Liste von Coin-IDs die
-# aktuellen Preise in beliebigen Fiatwährungen. Beispiel-URL:
-#
-#   https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=chf
-#
-# Antwort (JSON):
-#   { "bitcoin": {"chf": 58234.12}, "ethereum": {"chf": 3102.55} }
-#
-# Rückgabe der Funktion: Das rohe JSON (wird später mit jq geparst).
+check_dependencies() {
+    local missing=0
+    # 'mutt' ist nur empfehlenswert, aber nicht zwingend (wir haben Python-Fallback)
+    for cmd in curl jq bc python3; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            log ERROR "Benötigtes Kommando '$cmd' nicht gefunden."
+            missing=1
+        fi
+    done
+    if [[ $missing -eq 1 ]]; then
+        log ERROR "Bitte fehlende Pakete installieren (siehe README)."
+        exit 1
+    fi
+    log SUCCESS "Alle Abhängigkeiten verfügbar."
+}
+
+# =============================================================================
+# KURSABFRAGE MIT CACHE
+# =============================================================================
+
 # -----------------------------------------------------------------------------
-fetch_prices() {
-    # Alle Coin-IDs aus dem DEPOT-Array auslesen und zu "bitcoin,ethereum" zusammenbauen.
-    # ${!DEPOT[@]} liefert die Schlüssel des assoziativen Arrays.
-    local ids
-    ids=$(IFS=,; echo "${!DEPOT[*]}")
+# is_cache_valid — Prüft, ob der Cache existiert und noch frisch ist
+# -----------------------------------------------------------------------------
+# Rückgabe (Exit-Code):
+#   0 = Cache ist gültig (Datei existiert UND jünger als CACHE_MAX_AGE)
+#   1 = Cache ungültig oder fehlend → neu laden
+#
+# Technik:  'stat -c %Y <datei>' liefert den Unix-Timestamp der letzten
+# Änderung. Das aktuelle Alter = jetzt - letzte_Änderung.
+# -----------------------------------------------------------------------------
+is_cache_valid() {
+    # Datei existiert nicht → ungültig
+    if [[ ! -f "$CACHE_FILE" ]]; then
+        return 1
+    fi
 
-    local url="https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=${CURRENCY}"
+    local now file_mtime age
+    now=$(date +%s)
+    file_mtime=$(stat -c %Y "$CACHE_FILE")
+    age=$(( now - file_mtime ))
 
-    log "Rufe Kurse ab: $url" >&2   # >&2 = auf stderr, damit stdout "sauber" bleibt
-
-    # curl-Optionen:
-    #   -s : silent (keine Fortschrittsanzeige)
-    #   -f : bei HTTP-Fehler (4xx/5xx) mit Fehler abbrechen
-    #   --max-time 10 : Timeout nach 10 Sekunden
-    curl -sf --max-time 10 "$url"
+    if [[ $age -lt $CACHE_MAX_AGE ]]; then
+        log INFO "Cache ist noch gültig (Alter: ${age}s < ${CACHE_MAX_AGE}s)."
+        return 0
+    else
+        log INFO "Cache ist veraltet (Alter: ${age}s ≥ ${CACHE_MAX_AGE}s)."
+        return 1
+    fi
 }
 
 # -----------------------------------------------------------------------------
-# FUNKTION: Gesamtwert des Depots berechnen
+# fetch_prices_from_api — Holt frische Kurse von CoinGecko
 # -----------------------------------------------------------------------------
-# Eingabe: JSON-String von CoinGecko (als Parameter $1)
-# Ausgabe: Gesamtwert in CHF (Dezimalzahl, z.B. "48234.56")
+# Nutzt curls eingebaute Retry-Mechanik:
+#   --retry N                      : bis zu N Wiederholungen
+#   --retry-delay S                : feste Pause zwischen Versuchen
+#   --retry-connrefused            : auch bei "connection refused" retryen
+#   -f (fail) : Bricht bei HTTP-Fehler 4xx/5xx mit Exit-Code != 0 ab,
+#               damit set -e greift.
 #
-# Für jede Coin im Depot:
-#   - Preis aus dem JSON mit jq auslesen
-#   - Preis × gehaltene Menge rechnen (mit bc für Fliesskomma)
-#   - Alles aufsummieren
+# Nach erfolgreichem Abruf wird die Antwort in CACHE_FILE gespeichert.
+# -----------------------------------------------------------------------------
+fetch_prices_from_api() {
+    local ids url
+    # Coin-IDs aus DEPOT zu Komma-Liste zusammenbauen: "bitcoin,ethereum"
+    ids=$(IFS=,; echo "${!DEPOT[*]}")
+    url="https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=${CURRENCY}"
+
+    log INFO "Rufe Kurse von CoinGecko ab (bis zu ${CURL_RETRIES} Versuche)..."
+
+    # Wir schreiben in eine temporäre Datei und verschieben erst nach Erfolg
+    # in die Cache-Datei. So bleibt der alte Cache intakt, falls der Request
+    # mittendrin fehlschlägt (atomares Update).
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    if curl -sf \
+            --retry "$CURL_RETRIES" \
+            --retry-delay "$CURL_RETRY_DELAY" \
+            --retry-connrefused \
+            --max-time "$CURL_TIMEOUT" \
+            "$url" -o "$tmp_file"; then
+        mv "$tmp_file" "$CACHE_FILE"
+        log SUCCESS "Kurse erfolgreich abgerufen und gecacht."
+    else
+        rm -f "$tmp_file"
+        log ERROR "API-Abruf nach ${CURL_RETRIES} Versuchen fehlgeschlagen."
+        # Falls ein alter Cache existiert, nutzen wir ihn notfalls als Fallback.
+        if [[ -f "$CACHE_FILE" ]]; then
+            log WARN "Nutze veralteten Cache als Notfall-Fallback."
+        else
+            exit 1
+        fi
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# load_prices — Einstiegspunkt: entscheidet Cache vs. frischer Abruf
+# -----------------------------------------------------------------------------
+# Gibt das rohe JSON auf stdout aus (wird vom Aufrufer mit $(...) aufgefangen).
+# -----------------------------------------------------------------------------
+load_prices() {
+    if ! is_cache_valid; then
+        fetch_prices_from_api
+    else
+        log INFO "Verwende Kurse aus lokalem Cache: $CACHE_FILE"
+    fi
+    cat "$CACHE_FILE"
+}
+
+# =============================================================================
+# BERECHNUNG
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# calculate_total_value — Gesamtwert des Depots aus JSON berechnen
+# -----------------------------------------------------------------------------
+# Input:  JSON-String (Parameter $1)
+# Output: Gesamtwert in CHF (Dezimalzahl) auf stdout
 # -----------------------------------------------------------------------------
 calculate_total_value() {
     local json="$1"
     local total="0"
 
-    # Wir gehen durch jeden Coin im Depot:
     for coin in "${!DEPOT[@]}"; do
         local amount="${DEPOT[$coin]}"
-
-        # jq-Aufruf: aus {"bitcoin":{"chf":58234.12}} den Wert für .bitcoin.chf ziehen.
-        # --arg coin "$coin" übergibt die Variable sicher an jq (vermeidet Injection).
         local price
+        # --arg übergibt die Variablen sicher an jq (keine Injection möglich).
         price=$(echo "$json" | jq -r --arg coin "$coin" --arg cur "$CURRENCY" \
                 '.[$coin][$cur]')
 
-        # Sanity-Check: falls jq "null" liefert (Coin nicht gefunden), abbrechen.
         if [[ "$price" == "null" || -z "$price" ]]; then
-            echo "FEHLER: Kein Preis für '$coin' erhalten." >&2
+            log ERROR "Kein Preis für '$coin' im JSON gefunden."
             exit 1
         fi
 
-        log "  $coin: $amount × $price $CURRENCY" >&2
-
-        # bc rechnet mit Fliesskomma. scale=2 = 2 Nachkommastellen.
-        # Die Variable "total" wird in jedem Durchlauf überschrieben.
+        log INFO "  $coin: $amount × $price $CURRENCY"
         total=$(echo "scale=2; $total + ($price * $amount)" | bc -l)
     done
 
-    # Ergebnis auf stdout ausgeben (wird vom Aufrufer per $(...) eingefangen)
     echo "$total"
 }
 
-# -----------------------------------------------------------------------------
-# FUNKTION: Alarm prüfen
-# -----------------------------------------------------------------------------
-# Vergleicht den aktuellen Wert mit dem Startwert.
-# Rückgabe (Exit-Code):
-#   0 = Alles ok (kein Alarm)
-#   1 = Alarm! Verlust überschreitet Schwellwert
-#
-# Zusätzlich setzt die Funktion die globale Variable LOSS_AMOUNT auf den
-# Verlustbetrag in CHF, damit wir ihn später für die QR-Rechnung nutzen können.
-# -----------------------------------------------------------------------------
-LOSS_AMOUNT="0"  # wird später ggf. überschrieben
+# =============================================================================
+# ALLZEITHOCH (TRAILING STOP-LOSS)
+# =============================================================================
 
-check_alarm() {
+# -----------------------------------------------------------------------------
+# read_or_init_ath — Lädt ATH aus Datei oder initialisiert es
+# -----------------------------------------------------------------------------
+# Erster Parameter: aktueller Depotwert (wird nur genutzt, falls ATH noch
+# nicht existiert — dann ist der aktuelle Wert gleichzeitig das erste ATH).
+#
+# Gibt das ATH auf stdout aus.
+# -----------------------------------------------------------------------------
+read_or_init_ath() {
     local current_value="$1"
 
-    # Verlust in CHF:  Startwert - aktueller Wert
-    # (positive Zahl = Verlust, negative Zahl = Gewinn)
-    local loss
-    loss=$(echo "scale=2; $START_VALUE - $current_value" | bc -l)
+    if [[ ! -f "$ATH_FILE" ]]; then
+        log WARN "ATH-Datei fehlt — initialisiere mit aktuellem Wert ($current_value)."
+        echo "$current_value" > "$ATH_FILE"
+    fi
 
-    # Verlust in Prozent:  (Verlust / Startwert) * 100
-    local loss_percent
-    loss_percent=$(echo "scale=2; ($loss / $START_VALUE) * 100" | bc -l)
+    # tr -d entfernt Leerzeichen/Newlines, damit bc damit rechnen kann.
+    cat "$ATH_FILE" | tr -d '[:space:]'
+}
 
-    log "Startwert:      $START_VALUE $CURRENCY"
-    log "Aktueller Wert: $current_value $CURRENCY"
-    log "Verlust:        $loss $CURRENCY ($loss_percent %)"
+# -----------------------------------------------------------------------------
+# update_ath_if_higher — Überschreibt ath.txt, falls neuer Rekord
+# -----------------------------------------------------------------------------
+# Vergleicht mit bc, da Bash keine Fliesskommazahlen vergleichen kann.
+# -----------------------------------------------------------------------------
+update_ath_if_higher() {
+    local current_value="$1"
+    local old_ath="$2"
 
-    # Vergleich mit bc, weil Bash selbst keine Fliesskommazahlen vergleichen kann.
-    # "bc" liefert "1" wenn wahr, "0" wenn falsch.
+    local is_new_high
+    is_new_high=$(echo "$current_value > $old_ath" | bc -l)
+
+    if [[ "$is_new_high" -eq 1 ]]; then
+        echo "$current_value" > "$ATH_FILE"
+        log SUCCESS "🚀 Neues Allzeithoch! $old_ath → $current_value $CURRENCY"
+    fi
+}
+
+# =============================================================================
+# ALARM-PRÜFUNG
+# =============================================================================
+
+# Globale Variable, die vom Alarm-Check gesetzt wird, damit die
+# QR-Generierung nachher den exakten Ausgleichsbetrag kennt.
+LOSS_AMOUNT="0"
+
+# -----------------------------------------------------------------------------
+# check_alarm — Vergleicht aktuellen Wert mit ATH
+# -----------------------------------------------------------------------------
+# Rückgabe:
+#   0 = kein Alarm
+#   1 = Alarm (LOSS_AMOUNT wird gesetzt)
+# -----------------------------------------------------------------------------
+check_alarm() {
+    local current_value="$1"
+    local ath="$2"
+
+    # Verlust in CHF = ATH - aktueller Wert
+    local loss loss_percent
+    loss=$(echo "scale=2; $ath - $current_value" | bc -l)
+    loss_percent=$(echo "scale=2; ($loss / $ath) * 100" | bc -l)
+
+    log INFO "Allzeithoch:    $ath $CURRENCY"
+    log INFO "Aktueller Wert: $current_value $CURRENCY"
+    log INFO "Verlust:        $loss $CURRENCY (${loss_percent} %)"
+
     local is_alarm
     is_alarm=$(echo "$loss_percent > $ALARM_THRESHOLD_PERCENT" | bc -l)
 
     if [[ "$is_alarm" -eq 1 ]]; then
         LOSS_AMOUNT="$loss"
-        log "⚠️  ALARM: Verlust überschreitet ${ALARM_THRESHOLD_PERCENT}%!"
+        log ERROR "⚠️  ALARM: Verlust überschreitet ${ALARM_THRESHOLD_PERCENT}%!"
         return 1
     else
-        log "✅ Kein Alarm — Depot innerhalb des Toleranzbereichs."
+        log SUCCESS "✅ Kein Alarm — Depot innerhalb des Toleranzbereichs."
         return 0
     fi
 }
 
+# =============================================================================
+# CSV-HISTORIE
+# =============================================================================
+
 # -----------------------------------------------------------------------------
-# PLATZHALTER — werden in Schritt 2 und 3 gefüllt
+# append_history — Fügt eine Zeile in history.csv ein
 # -----------------------------------------------------------------------------
-generate_qr_invoice() {
-    log "TODO (Schritt 2): QR-Rechnung über $LOSS_AMOUNT $CURRENCY erzeugen"
-    # Hier rufen wir später qr_invoice.py auf
+# Format: Datum, Uhrzeit, Gesamtwert in CHF
+# Header wird nur einmal geschrieben, beim ersten Lauf.
+# -----------------------------------------------------------------------------
+append_history() {
+    local total_value="$1"
+
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        log INFO "Erstelle neue Historien-Datei: $HISTORY_FILE"
+        echo "Datum,Uhrzeit,Gesamtwert_CHF" > "$HISTORY_FILE"
+    fi
+
+    local date_part time_part
+    date_part=$(date '+%Y-%m-%d')
+    time_part=$(date '+%H:%M:%S')
+
+    echo "${date_part},${time_part},${total_value}" >> "$HISTORY_FILE"
+    log INFO "History-Eintrag ergänzt: ${date_part} ${time_part} → ${total_value} CHF"
 }
 
-send_telegram_notification() {
-    log "TODO (Schritt 3): Telegram-Benachrichtigung senden"
-    # Hier rufen wir später die Telegram Bot API auf
+# =============================================================================
+# PLATZHALTER — werden in den nächsten Schritten befüllt
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# generate_qr_invoice — Ruft das Python-Hilfsskript auf
+# -----------------------------------------------------------------------------
+# Wird in Schritt 2 (QR-Rechnung) vollständig implementiert. Setzt dann die
+# globale Variable QR_FILE_PATH, damit die E-Mail-Funktion sie anhängen kann.
+# -----------------------------------------------------------------------------
+QR_FILE_PATH=""
+
+generate_qr_invoice() {
+    log WARN "TODO (Schritt 2): QR-Rechnung über $LOSS_AMOUNT $CURRENCY erzeugen."
+    # Beispiel-Vorbereitung (auskommentiert — aktivieren wir in Schritt 2):
+    # mkdir -p "$OUTPUT_DIR"
+    # QR_FILE_PATH="$OUTPUT_DIR/qr_invoice_$(date +%Y%m%d_%H%M%S).pdf"
+    # python3 "$SCRIPT_DIR/qr_invoice.py" \
+    #     --amount "$LOSS_AMOUNT" \
+    #     --iban "$QR_IBAN" \
+    #     --name "$QR_CREDITOR_NAME" \
+    #     --street "$QR_CREDITOR_STREET" \
+    #     --plz "$QR_CREDITOR_PLZ" \
+    #     --city "$QR_CREDITOR_CITY" \
+    #     --country "$QR_CREDITOR_COUNTRY" \
+    #     --output "$QR_FILE_PATH"
+}
+
+# -----------------------------------------------------------------------------
+# send_email_notification — Sendet Alarm-E-Mail mit QR-Anhang
+# -----------------------------------------------------------------------------
+# Strategie:
+#   1) Falls 'mutt' installiert ist → nativ mit -a für Anhang nutzen
+#      Beispiel: mutt -s "Betreff" -a anhang.pdf -- empfaenger@example.com < body.txt
+#
+#   2) Sonst Python-Fallback: kleines Inline-Skript baut eine MIME-Mail
+#      und verschickt sie über localhost:25 (setzt laufenden MTA voraus).
+#
+# Der QR-Code wird ZWINGEND als Anhang mitgesendet. Falls QR_FILE_PATH leer
+# ist (weil QR-Generierung fehlschlug), brechen wir mit Fehler ab.
+# -----------------------------------------------------------------------------
+send_email_notification() {
+    log INFO "Bereite E-Mail-Versand vor..."
+
+    # Vorbedingung: Es muss einen QR-Anhang geben (wird in Schritt 2 aktiv).
+    if [[ -z "$QR_FILE_PATH" || ! -f "$QR_FILE_PATH" ]]; then
+        log WARN "Kein QR-Anhang vorhanden (Schritt 2 noch nicht aktiv) — skippe E-Mail."
+        return 0
+    fi
+
+    # Body-Text für die E-Mail zusammenbauen
+    local body_file
+    body_file=$(mktemp)
+    cat > "$body_file" <<EOF
+Achtung: Depotwert gefallen!
+
+Das überwachte Krypto-Depot hat die definierte Verlustschwelle von
+${ALARM_THRESHOLD_PERCENT}% gegenüber dem Allzeithoch überschritten.
+
+Ausgleichsbetrag: ${LOSS_AMOUNT} ${CURRENCY^^}
+
+Im Anhang findest du eine Schweizer QR-Rechnung über genau diesen Betrag,
+um das Depot wieder auszugleichen.
+
+— ${EMAIL_SENDER_NAME}
+EOF
+
+    # Pfad 1: mutt (bevorzugt)
+    if command -v mutt >/dev/null 2>&1; then
+        log INFO "Versende via mutt..."
+        mutt -s "$EMAIL_SUBJECT" \
+             -a "$QR_FILE_PATH" \
+             -- "$EMAIL_RECIPIENT" < "$body_file"
+        log SUCCESS "E-Mail erfolgreich via mutt versendet."
+
+    # Pfad 2: Python-Fallback mit dem Standard-email-Modul
+    else
+        log WARN "'mutt' nicht gefunden — nutze Python-Fallback."
+        python3 - <<PYEOF
+import smtplib, ssl, os
+from email.message import EmailMessage
+from pathlib import Path
+
+msg = EmailMessage()
+msg["Subject"] = "$EMAIL_SUBJECT"
+msg["From"]    = "$EMAIL_SENDER_NAME <no-reply@localhost>"
+msg["To"]      = "$EMAIL_RECIPIENT"
+msg.set_content(Path("$body_file").read_text())
+
+# QR-Rechnung als Anhang hinzufügen
+attachment = Path("$QR_FILE_PATH")
+msg.add_attachment(
+    attachment.read_bytes(),
+    maintype="application",
+    subtype="octet-stream",
+    filename=attachment.name,
+)
+
+# Versand über lokalen MTA (Port 25). Für echten Versand müsstet ihr
+# hier euren SMTP-Server (z.B. smtp.gmail.com) mit Auth eintragen.
+with smtplib.SMTP("localhost", 25) as s:
+    s.send_message(msg)
+print("E-Mail via Python-Fallback versendet.")
+PYEOF
+        log SUCCESS "E-Mail via Python-Fallback versendet."
+    fi
+
+    rm -f "$body_file"
 }
 
 # =============================================================================
 # HAUPT-PROGRAMM
 # =============================================================================
 main() {
-    log "=== Krypto-Depot-Monitor gestartet ==="
+    log INFO "${COLOR_BOLD}=== Krypto-Depot-Monitor gestartet ===${COLOR_RESET}"
 
     check_dependencies
 
-    # Kurse holen
+    # --- Schritt A: Kurse laden (Cache oder API) ---
     local json
-    json=$(fetch_prices)
+    json=$(load_prices)
+    sleep "$THROTTLE_SLEEP"   # Ressourcen schonen vor nächstem Block
 
-    # Gesamtwert berechnen
+    # --- Schritt B: Gesamtwert berechnen ---
     local total_value
     total_value=$(calculate_total_value "$json")
+    log INFO "Gesamtwert: ${COLOR_BOLD}${total_value} ${CURRENCY^^}${COLOR_RESET}"
 
-    # Alarm prüfen. "|| true" verhindert, dass set -e das Skript beendet,
-    # wenn check_alarm mit Exit-Code 1 zurückkehrt.
-    if ! check_alarm "$total_value"; then
+    # --- Schritt C: CSV-Historie aktualisieren ---
+    append_history "$total_value"
+
+    # --- Schritt D: Allzeithoch laden und ggf. aktualisieren ---
+    local ath
+    ath=$(read_or_init_ath "$total_value")
+    update_ath_if_higher "$total_value" "$ath"
+    # ATH nach dem Update erneut lesen (falls es sich geändert hat — ist aber
+    # für den Alarm-Check nicht nötig, da ein neues ATH Verlust = 0 bedeutet).
+    ath=$(read_or_init_ath "$total_value")
+
+    # --- Schritt E: Alarm-Check ---
+    # "|| true" verhindert, dass set -e hier abbricht, wenn check_alarm
+    # mit Exit 1 zurückkehrt.
+    if ! check_alarm "$total_value" "$ath"; then
+        sleep "$THROTTLE_SLEEP"    # Pause vor QR-Generierung
         generate_qr_invoice
-        send_telegram_notification
+        sleep "$THROTTLE_SLEEP"    # Pause vor E-Mail-Versand
+        send_email_notification
     fi
 
-    log "=== Fertig ==="
+    log SUCCESS "${COLOR_BOLD}=== Fertig ===${COLOR_RESET}"
 }
 
-# Skript ausführen (Funktion am Ende aufrufen, damit alle Funktionen
-# vorher definiert sind).
 main "$@"
