@@ -1,0 +1,38 @@
+{
+  "totalValue": 48250.75,
+  "currency": "CHF",
+  "percentChange": -4.8,
+  "ath": 56800.00,
+  "lossFromAth": -8.2,
+  "status": "OK",
+  "alarmThreshold": 15,
+  "lastUpdated": "2026-04-13T14:32:08+02:00",
+  "coins": [
+    {
+      "id": "bitcoin",
+      "symbol": "BTC",
+      "name": "Bitcoin",
+      "amount": 0.5,
+      "pricePerUnit": 82450.00,
+      "totalValue": 41225.00,
+      "change24h": -3.2
+    },
+    {
+      "id": "ethereum",
+      "symbol": "ETH",
+      "name": "Ethereum",
+      "amount": 4.0,
+      "pricePerUnit": 1756.44,
+      "totalValue": 7025.75,
+      "change24h": -6.1
+    }
+  ],
+  "alarm": {
+    "triggered": false,
+    "lossAmount": 0,
+    "qrGenerated": false,
+    "notificationSent": false,
+    "notificationChannel": "Telegram",
+    "timestamp": ""
+  }
+}

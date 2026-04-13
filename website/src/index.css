@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0e1a;
+  --color-bg-card: #0f1428;
+  --color-surface: #111827;
+
+  --color-gain: #00f0a0;
+  --color-gain-dim: #00f0a026;
+  --color-loss: #ff4d6a;
+  --color-loss-dim: #ff4d6a26;
+  --color-warn: #f0b400;
+  --color-warn-dim: #f0b40026;
+  --color-accent: #6366f1;
+  --color-accent-dim: #6366f126;
+
+  --color-text-primary: #e2e8f0;
+  --color-text-dim: #7b8ba5;
+  --color-text-muted: #4a5568;
+
+  --color-glass-border: #ffffff12;
+  --color-glass-bg: #ffffff0a;
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* ── Base ──────────────────────────────────── */
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  min-height: 100vh;
+}
+
+/* ── Scrollbar ─────────────────────────────── */
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--color-bg); }
+::-webkit-scrollbar-thumb { background: #ffffff18; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #ffffff2e; }
+
+/* ── Glass Card Base ───────────────────────── */
+
+.glass-card {
+  background: linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid var(--color-glass-border);
+  border-radius: 16px;
+}
+
+/* ── Animations ────────────────────────────── */
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.12); }
+}
+
+@keyframes blink-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes alarm-pulse {
+  0%, 100% { box-shadow: inset 0 0 40px rgba(255,77,106,0.04); }
+  50% { box-shadow: inset 0 0 60px rgba(255,77,106,0.12); }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-pulse-glow { animation: pulse-glow 6s ease-in-out infinite; }
+.animate-blink { animation: blink-dot 2s ease-in-out infinite; }
+.animate-alarm-pulse { animation: alarm-pulse 3s ease-in-out infinite; }
