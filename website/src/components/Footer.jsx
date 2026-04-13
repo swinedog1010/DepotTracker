@@ -3,7 +3,7 @@ export default function Footer() {
     <footer className="border-t border-glass-border py-10 px-6">
       <div className="max-w-[1280px] mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <img src="/logo.png" alt="DepotTracker" className="h-7 rounded-md" />
+          <img src="/DepotTracker/logo/logo.png" alt="DepotTracker" className="h-7 rounded-md" />
           <span className="text-sm text-text-dim">DepotTracker — Schulprojekt 2026</span>
         </div>
         <div className="flex gap-6">

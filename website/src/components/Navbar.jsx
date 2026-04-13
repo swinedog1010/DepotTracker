@@ -13,7 +13,7 @@ export default function Navbar({ isAlarm }) {
       <div className="max-w-[1280px] mx-auto h-full flex items-center justify-between px-6">
         {/* Brand */}
         <a href="#" className="flex items-center gap-3">
-          <img src="/logo.png" alt="DepotTracker" className="h-9 w-auto rounded-lg" />
+          <img src="/DepotTracker/logo/logo.png" alt="DepotTracker" className="h-9 w-auto rounded-lg" />
           <span className="text-lg font-bold bg-gradient-to-r from-white to-gain bg-clip-text text-transparent">
             DepotTracker
           </span>
