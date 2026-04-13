@@ -23,6 +23,50 @@
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
+# AUFRÄUM-MECHANISMUS (TRAP)
+# -----------------------------------------------------------------------------
+# Idee: Wir sammeln jede mit 'mktemp' erzeugte Datei in einer globalen
+# Variable TMP_FILES. Am Skript-Ende ruft 'trap ... EXIT' automatisch die
+# cleanup-Funktion auf, die alle gesammelten Dateien löscht.
+#
+# Vorteil gegenüber manuellem 'rm -f' an jeder Stelle:
+#   • Auch bei einem Absturz (set -e, Exception, Ctrl-C) wird aufgeräumt.
+#   • Der normale Code-Pfad muss sich nicht um Cleanup kümmern → weniger
+#     Boilerplate, weniger Stellen an denen man rm vergessen kann.
+#   • Single Source of Truth: die Liste der Temp-Dateien lebt an einem Ort.
+#
+# Wichtig: Die globale Variable MUSS vor dem 'trap'-Aufruf existieren,
+# sonst würde 'set -u' beim ersten EXIT-Trap aus Versehen crashen.
+# -----------------------------------------------------------------------------
+TMP_FILES=""
+
+cleanup() {
+    # Exit-Code des letzten Befehls merken, damit wir ihn am Ende an die
+    # Shell zurückgeben und das Skript-Ergebnis nicht durch Cleanup-Aktionen
+    # verfälschen. ($? ist der Exit-Code des Befehls, der den Trap ausgelöst hat.)
+    local exit_code=$?
+
+    # Über die gesammelten Pfade iterieren und löschen.
+    # Die unquoted Expansion von $TMP_FILES ist hier gewollt: wir wollen
+    # am Leerzeichen splitten. mktemp liefert Pfade ohne Leerzeichen.
+    if [[ -n "$TMP_FILES" ]]; then
+        for f in $TMP_FILES; do
+            # -f = keine Fehlermeldung, falls Datei schon weg ist.
+            # 2>/dev/null = falls die Datei nicht (mehr) existiert oder
+            # keine Löschrechte bestehen, keinen Fehler werfen.
+            rm -f "$f" 2>/dev/null || true
+        done
+    fi
+
+    # Wichtig: Original-Exit-Code durchreichen.
+    exit "$exit_code"
+}
+
+# EXIT fängt normalen UND abnormalen Ausstieg (Fehler, Signal) ab.
+# Dadurch reicht ein einziger Trap für alle Szenarien.
+trap cleanup EXIT
+
+# -----------------------------------------------------------------------------
 # KONFIGURATION EINLESEN
 # -----------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -145,8 +189,14 @@ fetch_prices_from_api() {
     # Wir schreiben in eine temporäre Datei und verschieben erst nach Erfolg
     # in die Cache-Datei. So bleibt der alte Cache intakt, falls der Request
     # mittendrin fehlschlägt (atomares Update).
+    #
+    # Die Temp-Datei wird sofort bei TMP_FILES registriert, damit der EXIT-Trap
+    # sie auch im Fehlerfall sicher aufräumt. (Bei Erfolg wird sie durch 'mv'
+    # zur Cache-Datei verschoben — dann greift der rm-Versuch im Cleanup ins
+    # Leere, was dank '-f' und '|| true' harmlos ist.)
     local tmp_file
     tmp_file=$(mktemp)
+    TMP_FILES="$TMP_FILES $tmp_file"
 
     if curl -sf \
             --retry "$CURL_RETRIES" \
@@ -157,8 +207,9 @@ fetch_prices_from_api() {
         mv "$tmp_file" "$CACHE_FILE"
         log SUCCESS "Kurse erfolgreich abgerufen und gecacht."
     else
-        rm -f "$tmp_file"
         log ERROR "API-Abruf nach ${CURL_RETRIES} Versuchen fehlgeschlagen."
+        # tmp_file muss hier NICHT manuell gelöscht werden — der EXIT-Trap
+        # erledigt das automatisch, auch wenn wir gleich per exit 1 abbrechen.
         # Falls ein alter Cache existiert, nutzen wir ihn notfalls als Fallback.
         if [[ -f "$CACHE_FILE" ]]; then
             log WARN "Nutze veralteten Cache als Notfall-Fallback."
@@ -374,9 +425,12 @@ send_email_notification() {
         return 0
     fi
 
-    # Body-Text für die E-Mail zusammenbauen
+    # Body-Text für die E-Mail zusammenbauen.
+    # Auch diese Temp-Datei registrieren wir am Trap — das manuelle rm am Ende
+    # der Funktion ist damit überflüssig.
     local body_file
     body_file=$(mktemp)
+    TMP_FILES="$TMP_FILES $body_file"
     cat > "$body_file" <<EOF
 Achtung: Depotwert gefallen!
 
@@ -431,7 +485,7 @@ PYEOF
         log SUCCESS "E-Mail via Python-Fallback versendet."
     fi
 
-    rm -f "$body_file"
+    # body_file wird NICHT manuell gelöscht — darum kümmert sich der EXIT-Trap.
 }
 
 # =============================================================================
