@@ -9,6 +9,7 @@ import ThresholdCard from './components/ThresholdCard';
 import AlertCard from './components/AlertCard';
 import CoinTable from './components/CoinTable';
 import Footer from './components/Footer';
+import EmailModal from './components/EmailModal';
 
 export default function App() {
   const { data, loading, error } = usePolling('/data.json', 5000);
@@ -65,6 +66,7 @@ export default function App() {
 
       <CoinTable coins={data?.coins} />
       <Footer />
+      <EmailModal />
     </div>
   );
 }
