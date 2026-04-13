@@ -7,7 +7,15 @@ export function usePolling(url, intervalMs = 5000) {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch(`${url}?t=${Date.now()}`);
+      // Fix für GitHub Pages: Passt den Pfad automatisch an, 
+      // damit die Datei im Unterordner gefunden wird.
+      let safeUrl = url;
+      if (safeUrl === '/data.json' || safeUrl === 'data.json') {
+        safeUrl = '/DepotTracker/data.json';
+      }
+
+      // Der Timestamp (?t=...) verhindert zusätzlich, dass der Browser alte Daten im Cache behält
+      const res = await fetch(`${safeUrl}?t=${Date.now()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setData(json);
