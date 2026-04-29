@@ -110,6 +110,23 @@ QR_COUNTRY="CH"
 # --- Cronjob ----------------------------------------------------------------
 CRON_SCHEDULE="0 9 * * *"   # taeglich um 09:00 Uhr
 
+# --- Python venv (Self-Healing Environment) ---------------------------------
+# Unter Ubuntu (PEP 668 / "externally-managed-environment") darf pip nicht
+# mehr direkt ins System-Python schreiben. Daher haelt das Skript eine eigene
+# venv vor und ruft Python ausschliesslich ueber PYTHON_BIN auf.
+PY_VENV_DIR="${SCRIPT_DIR}/venv"
+PYTHON_BIN="${PY_VENV_DIR}/bin/python3"   # Linux / macOS - Standard
+# Windows-Fallback (Git-Bash / MSYS): venv legt python.exe unter Scripts ab.
+if [[ ! -x "$PYTHON_BIN" && -x "${PY_VENV_DIR}/Scripts/python.exe" ]]; then
+    PYTHON_BIN="${PY_VENV_DIR}/Scripts/python.exe"
+fi
+PY_REQUIREMENTS=(qrbill svglib reportlab cairosvg)
+
+# --- Webserver --------------------------------------------------------------
+SERVER_SCRIPT="${SCRIPT_DIR}/server.py"
+SERVER_PORT=8000
+SERVER_URL="http://localhost:${SERVER_PORT}"
+
 # -----------------------------------------------------------------------------
 # 4) FARB-CODES & LOGGING
 # -----------------------------------------------------------------------------
@@ -155,7 +172,7 @@ load_credentials() {
     fi
 
     local out
-    if ! out="$(python3 - "$CREDENTIALS_FILE" <<'PYEOF'
+    if ! out="$("$PYTHON_BIN" - "$CREDENTIALS_FILE" <<'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -204,6 +221,18 @@ auto_setup() {
         log INFO "Erster Lauf erkannt - Verzeichnisse wurden erstellt."
     fi
 
+    # --- Defensive Initialisierung von Datendateien ------------------------
+    # Sorgt dafuer, dass spaetere Lese-Operationen (z.B. durch das Dashboard
+    # oder update_ath) auf garantiert vorhandene, valide Dateien treffen.
+    if [[ ! -f "$ATH_FILE" ]]; then
+        echo "0" > "$ATH_FILE"
+        log INFO "ATH-Datei initialisiert: $ATH_FILE (0)"
+    fi
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        echo "Datum,Uhrzeit,Gesamtwert_CHF,Status" > "$HISTORY_FILE"
+        log INFO "History-Datei initialisiert: $HISTORY_FILE"
+    fi
+
     # --- Cronjob nur einrichten, wenn noch nicht vorhanden ------------------
     # "command -v crontab" prueft, ob crontab ueberhaupt verfuegbar ist
     # (z.B. unter WSL/Windows nicht zwingend gegeben).
@@ -218,6 +247,64 @@ auto_setup() {
         fi
     else
         log WARN "crontab nicht verfuegbar - Cronjob-Setup uebersprungen."
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# 6b) PYTHON-VENV (Self-Healing Environment)
+# -----------------------------------------------------------------------------
+setup_python_env() {
+    # Stellt sicher, dass eine projektlokale Python-venv existiert und alle
+    # benoetigten Pakete (qrbill, svglib, reportlab, cairosvg) installiert
+    # sind. Damit umgeht das Skript den "externally-managed-environment"-
+    # Schutz (PEP 668) aktueller Ubuntu-/Debian-Versionen, ohne System-
+    # Pakete zu beruehren.
+
+    # --- venv erstellen, falls nicht vorhanden -----------------------------
+    if [[ ! -x "$PYTHON_BIN" ]]; then
+        log INFO "Keine Python-venv gefunden - erstelle ${PY_VENV_DIR}"
+        if ! command -v python3 >/dev/null 2>&1; then
+            log ERROR "python3 nicht installiert - bitte 'sudo apt install python3 python3-venv' ausfuehren."
+            exit 1
+        fi
+        if ! python3 -m venv "$PY_VENV_DIR" 2>>"$LOG_FILE"; then
+            log ERROR "venv konnte nicht erstellt werden - eventuell fehlt das Paket 'python3-venv'."
+            exit 1
+        fi
+        # Pfad nach Erstellung neu bestimmen (Linux vs. Windows-Layout).
+        if [[ -x "${PY_VENV_DIR}/bin/python3" ]]; then
+            PYTHON_BIN="${PY_VENV_DIR}/bin/python3"
+        elif [[ -x "${PY_VENV_DIR}/Scripts/python.exe" ]]; then
+            PYTHON_BIN="${PY_VENV_DIR}/Scripts/python.exe"
+        else
+            log ERROR "venv erstellt, aber kein python-Executable gefunden in $PY_VENV_DIR"
+            exit 1
+        fi
+        log SUCCESS "Python-venv erstellt: $PY_VENV_DIR"
+    fi
+
+    # --- Pakete pruefen und ggf. installieren ------------------------------
+    # Falls auch nur ein Modul fehlt, fahren wir den kompletten pip-Install
+    # einmalig durch. Das ist robust gegen halb-installierte venvs.
+    local missing=0 mod
+    for mod in "${PY_REQUIREMENTS[@]}"; do
+        if ! "$PYTHON_BIN" -c "import ${mod}" >/dev/null 2>&1; then
+            missing=1
+            break
+        fi
+    done
+
+    if (( missing == 1 )); then
+        log INFO "Installiere Python-Abhaengigkeiten in venv: ${PY_REQUIREMENTS[*]}"
+        "$PYTHON_BIN" -m pip install --quiet --upgrade pip >>"$LOG_FILE" 2>&1 || \
+            log WARN "pip-Upgrade fehlgeschlagen - fahre trotzdem fort."
+        if ! "$PYTHON_BIN" -m pip install --quiet "${PY_REQUIREMENTS[@]}" >>"$LOG_FILE" 2>&1; then
+            log ERROR "pip install fehlgeschlagen - Details siehe $LOG_FILE"
+            exit 1
+        fi
+        log SUCCESS "Python-Abhaengigkeiten installiert."
+    else
+        log INFO "Python-venv ist einsatzbereit (${PYTHON_BIN})."
     fi
 }
 
@@ -468,16 +555,8 @@ generate_qr_bill() {
     local amount="$1"
     local target="$2"
 
-    # Stellt sicher, dass die Python-Library installiert ist.
-    if ! python3 -c "import qrbill" >/dev/null 2>&1; then
-        log WARN "Python-Modul 'qrbill' fehlt - versuche pip3 install ..."
-        pip3 install --quiet qrbill || {
-            log ERROR "qrbill konnte nicht installiert werden."
-            return 1
-        }
-    fi
-
-    python3 - "$amount" "$target" <<'PYEOF'
+    # Modul-Verfuegbarkeit ist durch setup_python_env bereits sichergestellt.
+    "$PYTHON_BIN" - "$amount" "$target" <<'PYEOF'
 import sys
 from qrbill import QRBill
 
@@ -531,7 +610,7 @@ send_email() {
     EMAIL_RECIPIENT="$EMAIL_RECIPIENT" \
     EMAIL_SENDER_NAME="$EMAIL_SENDER_NAME" \
     EMAIL_SUBJECT="$EMAIL_SUBJECT" \
-    python3 - "$attach" "$body" <<'PYEOF'
+    "$PYTHON_BIN" - "$attach" "$body" <<'PYEOF'
 import os, sys, smtplib, ssl
 from email.message import EmailMessage
 
@@ -621,10 +700,108 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# 16b) DASHBOARD-LAUNCHER & SUCCESS-BANNER
+# -----------------------------------------------------------------------------
+print_success_banner() {
+    # Gut sichtbarer ASCII-Rahmen, der das Ende des Setups markiert und den
+    # Localhost-Link zum Anklicken bereitstellt.
+    local url="$SERVER_URL"
+    local line="============================================================"
+    printf "\n"
+    printf "%b%s%b\n" "$C_GREEN" "$line" "$C_RESET"
+    printf "%b   Setup erfolgreich! Das Dashboard ist bereit.%b\n" "$C_GREEN" "$C_RESET"
+    printf "\n"
+    printf "%b   Oeffne dein Dashboard unter:%b\n" "$C_GREEN" "$C_RESET"
+    printf "%b   %s%b\n" "$C_GREEN" "$url" "$C_RESET"
+    printf "%b%s%b\n" "$C_GREEN" "$line" "$C_RESET"
+    printf "\n"
+}
+
+is_server_running() {
+    # Plattform-unabhaengiger Check, ob bereits ein Prozess auf SERVER_PORT
+    # lauscht. Wir nutzen Python (steht durch die venv garantiert bereit),
+    # damit die Pruefung sowohl unter Linux als auch unter Windows-Bash
+    # zuverlaessig funktioniert.
+    "$PYTHON_BIN" - "$SERVER_PORT" <<'PYEOF' >/dev/null 2>&1
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket()
+s.settimeout(1)
+try:
+    s.connect(("127.0.0.1", port))
+    s.close()
+except OSError:
+    sys.exit(1)
+PYEOF
+}
+
+start_server_background() {
+    # Startet server.py im Hintergrund und legt PID + Logfile ab.
+    local server_log="${LOG_DIR}/server.log"
+    local pid_file="${SCRIPT_DIR}/server.pid"
+    log INFO "Starte Dashboard im Hintergrund -> $server_log"
+    # nohup koppelt den Prozess vom Terminal ab, damit das Dashboard
+    # weiterlaeuft, auch wenn das Skript endet.
+    nohup "$PYTHON_BIN" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
+    echo $! > "$pid_file"
+    # Kurze Wartezeit, damit der Server hochfaehrt, bevor wir das Banner
+    # mit der URL ausgeben.
+    local i
+    for i in 1 2 3 4 5; do
+        if is_server_running; then
+            return 0
+        fi
+        sleep 1
+    done
+    log WARN "Dashboard wurde gestartet, antwortet aber noch nicht auf $SERVER_URL"
+    return 1
+}
+
+maybe_start_dashboard() {
+    # Letzter Schritt im Skript: Wenn der Webserver schon laeuft, einfach
+    # den Banner zeigen. Sonst (interaktiv) nachfragen, ob er gestartet
+    # werden soll. Nicht-interaktive Laeufe (Cron) bleiben stumm und
+    # starten den Server NICHT - das waere fuer einen Cron-Lauf falsch.
+    if is_server_running; then
+        log INFO "Dashboard laeuft bereits auf $SERVER_URL"
+        print_success_banner
+        return 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+        log INFO "Nicht-interaktiver Lauf - Dashboard wird nicht automatisch gestartet."
+        return 0
+    fi
+
+    local answer=""
+    printf "\n%bDashboard ist nicht aktiv. Jetzt starten? [Y/n] %b" "$C_YELLOW" "$C_RESET"
+    if ! read -r answer; then
+        answer="n"
+    fi
+    answer="${answer:-Y}"
+
+    case "$answer" in
+        [Yy]*)
+            if start_server_background; then
+                print_success_banner
+            else
+                log WARN "Dashboard-Start unsicher - Logs: ${LOG_DIR}/server.log"
+            fi
+            ;;
+        *)
+            log INFO "Dashboard nicht gestartet. Manuell mit: $PYTHON_BIN $SERVER_SCRIPT"
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
 # 17) HAUPT-ABLAUF
 # -----------------------------------------------------------------------------
 main() {
     auto_setup
+    # Python-Umgebung (venv + Pakete) muss vor jedem Aufruf von "$PYTHON_BIN"
+    # bereitstehen, also direkt nach dem auto_setup einrichten.
+    setup_python_env
     log INFO "=== DepotTracker Lauf gestartet ==="
 
     # SMTP-Credentials werden best-effort geladen; fehlende Datei ist kein
@@ -665,6 +842,9 @@ main() {
     fi
 
     log INFO "=== DepotTracker Lauf beendet ==="
+
+    # Bequemer One-Command-Start: Webserver pruefen / starten + Banner.
+    maybe_start_dashboard
 }
 
 # Einstiegspunkt - nur ausfuehren, wenn Skript direkt aufgerufen wurde.

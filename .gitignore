@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 output/
+logs/
+venv/
 ath.txt
+history.csv
 price_cache.json
 credentials.json
+server.pid
