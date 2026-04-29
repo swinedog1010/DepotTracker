@@ -116,9 +116,11 @@ CRON_SCHEDULE="0 9 * * *"   # taeglich um 09:00 Uhr
 # venv vor und ruft Python ausschliesslich ueber PYTHON_BIN auf.
 PY_VENV_DIR="${SCRIPT_DIR}/venv"
 PYTHON_BIN="${PY_VENV_DIR}/bin/python3"   # Linux / macOS - Standard
+PIP_BIN="${PY_VENV_DIR}/bin/pip"          # Linux / macOS - Standard
 # Windows-Fallback (Git-Bash / MSYS): venv legt python.exe unter Scripts ab.
 if [[ ! -x "$PYTHON_BIN" && -x "${PY_VENV_DIR}/Scripts/python.exe" ]]; then
     PYTHON_BIN="${PY_VENV_DIR}/Scripts/python.exe"
+    PIP_BIN="${PY_VENV_DIR}/Scripts/pip.exe"
 fi
 PY_REQUIREMENTS=(qrbill svglib reportlab cairosvg)
 
@@ -161,14 +163,126 @@ log() {
 # -----------------------------------------------------------------------------
 # 5) CREDENTIALS LADEN (credentials.json -> SMTP_USER/SMTP_PASS)
 # -----------------------------------------------------------------------------
+prompt_for_credentials() {
+    # Fragt im Terminal interaktiv nach Gmail-Adresse + App-Passwort und
+    # legt anschliessend credentials.json an. Wird nur aufgerufen, wenn die
+    # Datei fehlt UND wir auf einem echten Terminal laufen (kein Cron).
+    # Die Eingabe von /dev/tty erfolgt deshalb explizit, damit die Prompts
+    # auch sichtbar sind, falls STDIN umgeleitet ist (z.B. via "| tee log").
+
+    local email pass_raw pass_clean confirm
+    printf "\n%b┌─ Gmail-Zugangsdaten einrichten ────────────────────────────┐%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ credentials.json fehlt. Ich lege sie jetzt fuer dich an.    │%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ Du brauchst ein Google-App-Passwort (16 Zeichen).           │%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b└─────────────────────────────────────────────────────────────┘%b\n\n" "$C_YELLOW" "$C_RESET"
+
+    # 3 Versuche fuer eine valide Eingabe -----------------------------------
+    local attempt
+    for attempt in 1 2 3; do
+        # E-Mail einlesen.
+        printf "Gmail-Adresse: "
+        if ! IFS= read -r email </dev/tty; then
+            log WARN "Eingabe abgebrochen - keine credentials.json erstellt."
+            return 1
+        fi
+        # Trim Whitespace.
+        email="${email#"${email%%[![:space:]]*}"}"
+        email="${email%"${email##*[![:space:]]}"}"
+
+        # Sehr einfache Plausibilitaetspruefung. Strenge Validierung uebernimmt
+        # spaeter ohnehin /save_smtp im Server, falls es ueber das UI passiert.
+        if [[ ! "$email" =~ ^[^[:space:]@\"\'\`\\]+@[^[:space:]@\"\'\`\\]+\.[^[:space:]@\"\'\`\\]{2,}$ ]]; then
+            printf "%bUngueltige E-Mail. Bitte nochmal.%b\n\n" "$C_RED" "$C_RESET"
+            continue
+        fi
+
+        # App-Passwort einlesen (verdeckt). "-s" unterdrueckt das Echo;
+        # echo am Ende erzwingt einen Zeilenumbruch.
+        printf "Google-App-Passwort (16 Zeichen, Eingabe ist verdeckt): "
+        if ! IFS= read -rs pass_raw </dev/tty; then
+            printf "\n"
+            log WARN "Eingabe abgebrochen - keine credentials.json erstellt."
+            return 1
+        fi
+        printf "\n"
+
+        # Whitespace fuer die Laengenpruefung entfernen, im Speicher aber das
+        # vom Nutzer eingegebene Format behalten (Google zeigt 4er-Gruppen).
+        pass_clean="${pass_raw// /}"
+        if [[ ! "$pass_clean" =~ ^[A-Za-z0-9]{16}$ ]]; then
+            printf "%bUngueltiges App-Passwort (16 alphanumerische Zeichen erwartet).%b\n\n" "$C_RED" "$C_RESET"
+            continue
+        fi
+
+        # Bestaetigung nur fuer die E-Mail (Passwort wird nicht erneut gezeigt).
+        printf "Speichere Absender %s? [Y/n] " "$email"
+        if ! IFS= read -r confirm </dev/tty; then
+            confirm="n"
+        fi
+        confirm="${confirm:-Y}"
+        case "$confirm" in
+            [Yy]*) ;;
+            *) printf "Abgebrochen.\n\n"; continue ;;
+        esac
+
+        # credentials.json atomar schreiben - via Python, um JSON-Escaping
+        # korrekt zu handhaben, ohne externe Tools wie jq vorauszusetzen.
+        if SMTP_USER_INPUT="$email" SMTP_PASS_INPUT="$pass_raw" \
+            "$PYTHON_BIN" - "$CREDENTIALS_FILE" <<'PYEOF'
+import json, os, sys, tempfile
+target = sys.argv[1]
+data = {
+    "smtp_user": os.environ["SMTP_USER_INPUT"],
+    "smtp_pass": os.environ["SMTP_PASS_INPUT"],
+}
+d = os.path.dirname(target) or "."
+fd, tmp = tempfile.mkstemp(prefix="credentials.", suffix=".tmp", dir=d)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    try:
+        os.chmod(tmp, 0o600)   # best effort - keine Wirkung unter Windows
+    except OSError:
+        pass
+    os.replace(tmp, target)
+except Exception as exc:
+    if os.path.exists(tmp):
+        try: os.unlink(tmp)
+        except OSError: pass
+    sys.stderr.write(f"credentials.json konnte nicht geschrieben werden: {exc}\n")
+    sys.exit(1)
+PYEOF
+        then
+            log SUCCESS "credentials.json wurde angelegt ($email)."
+            return 0
+        else
+            log ERROR "credentials.json konnte nicht geschrieben werden."
+            return 1
+        fi
+    done
+
+    log WARN "Drei Fehlversuche - credentials.json wurde NICHT erstellt."
+    return 1
+}
+
 load_credentials() {
     # Liest die Gmail-Credentials aus credentials.json. Diese Datei wird
     # ausserhalb von Git gehalten (siehe .gitignore) und entweder manuell
-    # aus credentials.example.json erstellt oder ueber das Web-Modal
-    # (server.py /save_smtp) befuellt.
+    # aus credentials.example.json erstellt, ueber das Web-Modal
+    # (server.py /save_smtp) befuellt - oder beim ersten interaktiven Lauf
+    # direkt hier per Terminal-Prompt.
     if [[ ! -f "$CREDENTIALS_FILE" ]]; then
-        log WARN "credentials.json fehlt - SMTP-Versand nicht moeglich."
-        return 1
+        # Nur fragen, wenn ein Terminal vorhanden ist. Cron-Laeufe sollen
+        # nicht stillschweigend haengen bleiben.
+        if [[ -t 0 || -e /dev/tty ]]; then
+            if ! prompt_for_credentials; then
+                return 1
+            fi
+        else
+            log WARN "credentials.json fehlt - SMTP-Versand nicht moeglich."
+            return 1
+        fi
     fi
 
     local out
@@ -267,15 +381,18 @@ setup_python_env() {
             log ERROR "python3 nicht installiert - bitte 'sudo apt install python3 python3-venv' ausfuehren."
             exit 1
         fi
+        # Eine NEUE venv mit dem System-python3 anlegen.
         if ! python3 -m venv "$PY_VENV_DIR" 2>>"$LOG_FILE"; then
             log ERROR "venv konnte nicht erstellt werden - eventuell fehlt das Paket 'python3-venv'."
             exit 1
         fi
-        # Pfad nach Erstellung neu bestimmen (Linux vs. Windows-Layout).
+        # Pfade nach Erstellung neu bestimmen (Linux vs. Windows-Layout).
         if [[ -x "${PY_VENV_DIR}/bin/python3" ]]; then
             PYTHON_BIN="${PY_VENV_DIR}/bin/python3"
+            PIP_BIN="${PY_VENV_DIR}/bin/pip"
         elif [[ -x "${PY_VENV_DIR}/Scripts/python.exe" ]]; then
             PYTHON_BIN="${PY_VENV_DIR}/Scripts/python.exe"
+            PIP_BIN="${PY_VENV_DIR}/Scripts/pip.exe"
         else
             log ERROR "venv erstellt, aber kein python-Executable gefunden in $PY_VENV_DIR"
             exit 1
@@ -284,8 +401,11 @@ setup_python_env() {
     fi
 
     # --- Pakete pruefen und ggf. installieren ------------------------------
-    # Falls auch nur ein Modul fehlt, fahren wir den kompletten pip-Install
-    # einmalig durch. Das ist robust gegen halb-installierte venvs.
+    # pip wird ausschliesslich ueber den ABSOLUTEN Pfad in der venv aufgerufen
+    # (kein "pip3" aus dem System-PATH). Damit umgeht das Skript Ubuntus
+    # PEP-668-Schutz und ist unabhaengig davon, ob pip3 ueberhaupt im PATH
+    # liegt - was auf frisch installiertem Ubuntu Server haeufig nicht der
+    # Fall ist.
     local missing=0 mod
     for mod in "${PY_REQUIREMENTS[@]}"; do
         if ! "$PYTHON_BIN" -c "import ${mod}" >/dev/null 2>&1; then
@@ -296,9 +416,13 @@ setup_python_env() {
 
     if (( missing == 1 )); then
         log INFO "Installiere Python-Abhaengigkeiten in venv: ${PY_REQUIREMENTS[*]}"
-        "$PYTHON_BIN" -m pip install --quiet --upgrade pip >>"$LOG_FILE" 2>&1 || \
+        if [[ ! -x "$PIP_BIN" ]]; then
+            log ERROR "pip nicht in venv gefunden ($PIP_BIN) - venv unvollstaendig."
+            exit 1
+        fi
+        "$PIP_BIN" install --quiet --upgrade pip >>"$LOG_FILE" 2>&1 || \
             log WARN "pip-Upgrade fehlgeschlagen - fahre trotzdem fort."
-        if ! "$PYTHON_BIN" -m pip install --quiet "${PY_REQUIREMENTS[@]}" >>"$LOG_FILE" 2>&1; then
+        if ! "$PIP_BIN" install --quiet "${PY_REQUIREMENTS[@]}" >>"$LOG_FILE" 2>&1; then
             log ERROR "pip install fehlgeschlagen - Details siehe $LOG_FILE"
             exit 1
         fi

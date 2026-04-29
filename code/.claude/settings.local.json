@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(bash -n \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/depotguard.sh\")"
+      "Bash(bash -n \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/depotguard.sh\")",
+      "Bash(bash *)"
     ]
   }
 }
