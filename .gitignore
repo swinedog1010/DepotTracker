@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+output/
+ath.txt
+price_cache.json
+credentials.json

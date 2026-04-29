@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="de-CH">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DepotTracker - Live Dashboard</title>
+    <meta name="description" content="DepotTracker - Live-Dashboard zur Überwachung des Krypto-Depots." />
+
+    <!-- Favicon (logo_depot.png liegt im Ordner /logo) -->
+    <link rel="icon" type="image/png" href="logo/logo_depot.png" />
+
+    <!-- Eigenes Stylesheet -->
+    <link rel="stylesheet" href="style.css" />
+
+    <!-- Chart.js via CDN fuer den interaktiven Verlauf-Chart -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+
+    <!-- Eigenes JavaScript -->
+    <script src="script.js" defer></script>
+</head>
+<body>
+
+    <!-- ====================================================================
+         E-MAIL MODAL (oeffnet sich beim ersten Besuch automatisch)
+         Zwei Schritte: 1) Empfaenger-Adresse, 2) Gmail-Absender + App-Passwort
+         ==================================================================== -->
+    <div id="email-modal" class="modal-overlay" aria-hidden="true">
+        <div class="modal-card" role="dialog" aria-labelledby="modal-title">
+            <header class="modal-header">
+                <img src="logo/logo_depot.png" alt="DepotTracker Logo" class="modal-logo" />
+                <h2 id="modal-title">E-Mail-Adresse hinterlegen</h2>
+                <p class="modal-subtitle" id="modal-subtitle">
+                    Du erhältst automatisch eine E-Mail mit einer Schweizer
+                    QR-Rechnung, sobald dein Depotwert die kritische Schwelle
+                    unterschreitet.
+                </p>
+            </header>
+
+            <!-- Schritt 1: Empfaenger-Adresse -->
+            <form id="email-form" class="modal-form" novalidate>
+                <span class="modal-stepper">Schritt 1 von 2</span>
+                <label for="email-input" class="modal-label">Empfänger-E-Mail</label>
+                <input
+                    id="email-input"
+                    name="email"
+                    type="email"
+                    placeholder="name@beispiel.ch"
+                    autocomplete="email"
+                    required
+                />
+                <p id="email-error" class="modal-error" hidden>
+                    Bitte geben Sie eine gültige E-Mail-Adresse ein.
+                </p>
+                <button type="submit" class="btn btn-primary" id="email-submit">
+                    Weiter
+                </button>
+            </form>
+
+            <!-- Schritt 2: Gmail-Absender + App-Passwort -->
+            <form id="smtp-form" class="modal-form" novalidate hidden>
+                <span class="modal-stepper">Schritt 2 von 2</span>
+                <label for="smtp-user-input" class="modal-label">Gmail-Adresse (Absender)</label>
+                <input
+                    id="smtp-user-input"
+                    name="smtp_user"
+                    type="email"
+                    placeholder="dein.name@gmail.com"
+                    autocomplete="username"
+                    required
+                />
+                <label for="smtp-pass-input" class="modal-label">App-Passwort (16 Zeichen)</label>
+                <input
+                    id="smtp-pass-input"
+                    name="smtp_pass"
+                    type="password"
+                    placeholder="abcd efgh ijkl mnop"
+                    autocomplete="off"
+                    spellcheck="false"
+                    required
+                />
+                <p class="modal-help">
+                    Kein App-Passwort?
+                    <a
+                        href="https://support.google.com/accounts/answer/185833"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >Hier in deinem Google-Konto erstellen.</a>
+                </p>
+                <p id="smtp-error" class="modal-error" hidden>
+                    Bitte gültige Gmail-Adresse und App-Passwort eingeben.
+                </p>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" id="smtp-skip" hidden>
+                        Überspringen
+                    </button>
+                    <button type="submit" class="btn btn-primary" id="smtp-submit">
+                        Speichern
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ====================================================================
+         TOAST-NOTIFICATIONS
+         ==================================================================== -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+    <!-- ====================================================================
+         HEADER / NAVIGATION
+         ==================================================================== -->
+    <header class="app-header">
+        <div class="brand">
+            <img src="logo/logo_depot.png" alt="Logo DepotTracker" class="brand-logo" />
+            <div class="brand-text">
+                <h1 class="brand-title">DepotTracker</h1>
+                <span class="brand-sub">Live-Überwachung &middot; LB3 2026</span>
+            </div>
+        </div>
+
+        <nav class="header-meta">
+            <div class="status-indicator" id="status-indicator">
+                <span class="status-dot status-ok" id="status-dot"></span>
+                <span class="status-label" id="status-label">System OK</span>
+            </div>
+            <div class="header-time" id="header-time">--:--:--</div>
+        </nav>
+    </header>
+
+    <!-- ====================================================================
+         HAUPT-INHALT
+         ==================================================================== -->
+    <main class="app-main">
+
+        <!-- Statistik-Karten ---------------------------------------------- -->
+        <section class="cards-grid" aria-label="Kennzahlen">
+            <article class="card card-accent">
+                <span class="card-label">Aktueller Depotwert</span>
+                <span class="card-value" data-counter data-target="14820.50" data-suffix=" CHF">0 CHF</span>
+                <span class="card-trend trend-up" id="trend-current">&#9650; +1.42 %</span>
+            </article>
+
+            <article class="card">
+                <span class="card-label">Allzeithoch (ATH)</span>
+                <span class="card-value" data-counter data-target="17240.00" data-suffix=" CHF">0 CHF</span>
+                <span class="card-sub">letzter Stand &middot; ath.txt</span>
+            </article>
+
+            <article class="card">
+                <span class="card-label">Verlust vom ATH</span>
+                <span class="card-value" data-counter data-target="14.04" data-suffix=" %">0 %</span>
+                <span class="card-trend trend-down">&#9660; über Schwelle</span>
+            </article>
+
+            <article class="card">
+                <span class="card-label">Alarme (30 Tage)</span>
+                <span class="card-value" data-counter data-target="3" data-suffix="">0</span>
+                <span class="card-sub">davon 1 aktiv</span>
+            </article>
+        </section>
+
+        <!-- Chart + Depot-Composition ------------------------------------- -->
+        <section class="grid-two">
+            <div class="panel panel-large">
+                <header class="panel-header">
+                    <h2>Wertentwicklung</h2>
+                    <div class="panel-actions">
+                        <button class="chip chip-active" data-range="7">7T</button>
+                        <button class="chip" data-range="30">30T</button>
+                        <button class="chip" data-range="90">90T</button>
+                    </div>
+                </header>
+                <div class="chart-wrapper">
+                    <canvas id="history-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="panel">
+                <header class="panel-header">
+                    <h2>Depot-Zusammensetzung</h2>
+                </header>
+                <ul class="composition-list" id="composition-list">
+                    <li>
+                        <div class="comp-row">
+                            <span class="comp-name">Bitcoin (BTC)</span>
+                            <span class="comp-value">0.5 BTC</span>
+                        </div>
+                        <div class="comp-bar">
+                            <div class="comp-fill comp-fill-btc" style="width: 78%;"></div>
+                        </div>
+                        <span class="comp-pct">78 %</span>
+                    </li>
+                    <li>
+                        <div class="comp-row">
+                            <span class="comp-name">Ethereum (ETH)</span>
+                            <span class="comp-value">4.0 ETH</span>
+                        </div>
+                        <div class="comp-bar">
+                            <div class="comp-fill comp-fill-eth" style="width: 22%;"></div>
+                        </div>
+                        <span class="comp-pct">22 %</span>
+                    </li>
+                </ul>
+
+                <div class="next-scan">
+                    <header class="panel-header tight">
+                        <h3>Nächster Scan</h3>
+                        <span id="next-scan-eta">in 04:53</span>
+                    </header>
+                    <div class="progress-track">
+                        <div class="progress-fill" id="scan-progress"></div>
+                    </div>
+                    <button class="btn btn-secondary" id="scan-now-btn">
+                        <span class="btn-icon">&#x21bb;</span> Scan jetzt auslösen
+                    </button>
+
+                    <!-- TODO: DEMO BUTTON — vor Abgabe entfernen -->
+                    <button class="btn btn-demo" id="demo-email-btn" type="button">
+                        <span class="btn-icon" id="demo-btn-icon">🧪</span>
+                        <span id="demo-btn-label">Demo: Test-Mail senden</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Letzte Laeufe (Tabelle) --------------------------------------- -->
+        <section class="panel">
+            <header class="panel-header">
+                <h2>Letzte Läufe</h2>
+                <span class="panel-hint">Quelle: history.csv</span>
+            </header>
+            <div class="table-wrapper">
+                <table class="runs-table">
+                    <thead>
+                        <tr>
+                            <th>Datum</th>
+                            <th>Uhrzeit</th>
+                            <th>Wert (CHF)</th>
+                            <th>Änderung</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="runs-body">
+                        <!-- wird per JS befuellt -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="app-footer">
+        <span>&copy; 2026 DepotTracker &middot; LB3-Projekt</span>
+        <button type="button" id="change-email-btn" class="footer-link">
+            E-Mail ändern
+        </button>
+        <span>Philippe &amp; Viggo</span>
+    </footer>
+
+</body>
+</html>

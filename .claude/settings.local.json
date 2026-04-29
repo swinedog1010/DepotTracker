@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash -n \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/depotguard.sh\")",
+      "Bash(php -l \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/save_email.php\")",
+      "Bash(command -v php)",
+      "Bash(php -l /c/Users/viggo/OneDrive/Desktop/DepotTracker/send_test_email.php)",
+      "Bash(python *)",
+      "Bash(python3 -m py_compile \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/code/server.py\")",
+      "Bash(node -c \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/code/script.js\")",
+      "Bash(bash -n \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/code/depotguard.sh\")",
+      "Bash(python3 - \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/code/credentials.json\")",
+      "Bash(python3 *)"
+    ]
+  }
+}
