@@ -14,7 +14,7 @@
 #    6. CSV-Historie schreiben
 #    7. Bei Unterdeckung: QR-Rechnung erzeugen + E-Mail versenden
 #  ----------------------------------------------------------------------------
-#  Abhaengigkeiten: curl, awk, base64 (sowie python3 fuer QR-Rechnung/SMTP)
+#  Abhaengigkeiten: curl, awk, base64 (Python via projektlokaler venv)
 ###############################################################################
 
 # -----------------------------------------------------------------------------
@@ -110,19 +110,19 @@ QR_COUNTRY="CH"
 # --- Cronjob ----------------------------------------------------------------
 CRON_SCHEDULE="0 9 * * *"   # taeglich um 09:00 Uhr
 
-# --- Python venv (Self-Healing Environment) ---------------------------------
+# --- Virtuelle Python-Umgebung ---
 # Unter Ubuntu (PEP 668 / "externally-managed-environment") darf pip nicht
 # mehr direkt ins System-Python schreiben. Daher haelt das Skript eine eigene
-# venv vor und ruft Python ausschliesslich ueber PYTHON_BIN auf.
-PY_VENV_DIR="${SCRIPT_DIR}/venv"
-PYTHON_BIN="${PY_VENV_DIR}/bin/python3"   # Linux / macOS - Standard
-PIP_BIN="${PY_VENV_DIR}/bin/pip"          # Linux / macOS - Standard
-# Windows-Fallback (Git-Bash / MSYS): venv legt python.exe unter Scripts ab.
-if [[ ! -x "$PYTHON_BIN" && -x "${PY_VENV_DIR}/Scripts/python.exe" ]]; then
-    PYTHON_BIN="${PY_VENV_DIR}/Scripts/python.exe"
-    PIP_BIN="${PY_VENV_DIR}/Scripts/pip.exe"
+# venv vor und ruft Python und pip ausschliesslich ueber VENV_PYTHON / VENV_PIP
+# auf - der einzig erlaubte System-Aufruf ist "python3 -m venv".
+VENV_DIR="${SCRIPT_DIR}/venv"
+VENV_PYTHON="${VENV_DIR}/bin/python3"
+VENV_PIP="${VENV_DIR}/bin/pip"
+# Windows-Fallback (Git-Bash / MSYS): venv legt die Executables unter Scripts ab.
+if [[ ! -x "$VENV_PYTHON" && -x "${VENV_DIR}/Scripts/python.exe" ]]; then
+    VENV_PYTHON="${VENV_DIR}/Scripts/python.exe"
+    VENV_PIP="${VENV_DIR}/Scripts/pip.exe"
 fi
-PY_REQUIREMENTS=(qrbill svglib reportlab cairosvg)
 
 # --- Webserver --------------------------------------------------------------
 SERVER_SCRIPT="${SCRIPT_DIR}/server.py"
@@ -228,7 +228,7 @@ prompt_for_credentials() {
         # credentials.json atomar schreiben - via Python, um JSON-Escaping
         # korrekt zu handhaben, ohne externe Tools wie jq vorauszusetzen.
         if SMTP_USER_INPUT="$email" SMTP_PASS_INPUT="$pass_raw" \
-            "$PYTHON_BIN" - "$CREDENTIALS_FILE" <<'PYEOF'
+            "$VENV_PYTHON" - "$CREDENTIALS_FILE" <<'PYEOF'
 import json, os, sys, tempfile
 target = sys.argv[1]
 data = {
@@ -286,7 +286,7 @@ load_credentials() {
     fi
 
     local out
-    if ! out="$("$PYTHON_BIN" - "$CREDENTIALS_FILE" <<'PYEOF'
+    if ! out="$("$VENV_PYTHON" - "$CREDENTIALS_FILE" <<'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -369,66 +369,27 @@ auto_setup() {
 # -----------------------------------------------------------------------------
 setup_python_env() {
     # Stellt sicher, dass eine projektlokale Python-venv existiert und alle
-    # benoetigten Pakete (qrbill, svglib, reportlab, cairosvg) installiert
-    # sind. Damit umgeht das Skript den "externally-managed-environment"-
-    # Schutz (PEP 668) aktueller Ubuntu-/Debian-Versionen, ohne System-
-    # Pakete zu beruehren.
+    # benoetigten Pakete installiert sind. Wird DIREKT NACH dem Setup-Block
+    # (auto_setup -> Ordner) aufgerufen, sodass alle nachfolgenden Python-
+    # Aufrufe garantiert ueber die venv laufen.
 
-    # --- venv erstellen, falls nicht vorhanden -----------------------------
-    if [[ ! -x "$PYTHON_BIN" ]]; then
-        log INFO "Keine Python-venv gefunden - erstelle ${PY_VENV_DIR}"
-        if ! command -v python3 >/dev/null 2>&1; then
-            log ERROR "python3 nicht installiert - bitte 'sudo apt install python3 python3-venv' ausfuehren."
-            exit 1
-        fi
-        # Eine NEUE venv mit dem System-python3 anlegen.
-        if ! python3 -m venv "$PY_VENV_DIR" 2>>"$LOG_FILE"; then
-            log ERROR "venv konnte nicht erstellt werden - eventuell fehlt das Paket 'python3-venv'."
-            exit 1
-        fi
+    # --- Virtuelle Python-Umgebung ---
+    if [ ! -d "$VENV_DIR" ]; then
+        log "INFO" "Erstelle virtuelle Python-Umgebung..."
+        # Einziger erlaubter System-Aufruf von python3.
+        python3 -m venv "$VENV_DIR"
         # Pfade nach Erstellung neu bestimmen (Linux vs. Windows-Layout).
-        if [[ -x "${PY_VENV_DIR}/bin/python3" ]]; then
-            PYTHON_BIN="${PY_VENV_DIR}/bin/python3"
-            PIP_BIN="${PY_VENV_DIR}/bin/pip"
-        elif [[ -x "${PY_VENV_DIR}/Scripts/python.exe" ]]; then
-            PYTHON_BIN="${PY_VENV_DIR}/Scripts/python.exe"
-            PIP_BIN="${PY_VENV_DIR}/Scripts/pip.exe"
-        else
-            log ERROR "venv erstellt, aber kein python-Executable gefunden in $PY_VENV_DIR"
-            exit 1
+        if [ -x "${VENV_DIR}/Scripts/python.exe" ]; then
+            VENV_PYTHON="${VENV_DIR}/Scripts/python.exe"
+            VENV_PIP="${VENV_DIR}/Scripts/pip.exe"
         fi
-        log SUCCESS "Python-venv erstellt: $PY_VENV_DIR"
+        log "SUCCESS" "venv erstellt."
     fi
 
-    # --- Pakete pruefen und ggf. installieren ------------------------------
-    # pip wird ausschliesslich ueber den ABSOLUTEN Pfad in der venv aufgerufen
-    # (kein "pip3" aus dem System-PATH). Damit umgeht das Skript Ubuntus
-    # PEP-668-Schutz und ist unabhaengig davon, ob pip3 ueberhaupt im PATH
-    # liegt - was auf frisch installiertem Ubuntu Server haeufig nicht der
-    # Fall ist.
-    local missing=0 mod
-    for mod in "${PY_REQUIREMENTS[@]}"; do
-        if ! "$PYTHON_BIN" -c "import ${mod}" >/dev/null 2>&1; then
-            missing=1
-            break
-        fi
-    done
-
-    if (( missing == 1 )); then
-        log INFO "Installiere Python-Abhaengigkeiten in venv: ${PY_REQUIREMENTS[*]}"
-        if [[ ! -x "$PIP_BIN" ]]; then
-            log ERROR "pip nicht in venv gefunden ($PIP_BIN) - venv unvollstaendig."
-            exit 1
-        fi
-        "$PIP_BIN" install --quiet --upgrade pip >>"$LOG_FILE" 2>&1 || \
-            log WARN "pip-Upgrade fehlgeschlagen - fahre trotzdem fort."
-        if ! "$PIP_BIN" install --quiet "${PY_REQUIREMENTS[@]}" >>"$LOG_FILE" 2>&1; then
-            log ERROR "pip install fehlgeschlagen - Details siehe $LOG_FILE"
-            exit 1
-        fi
-        log SUCCESS "Python-Abhaengigkeiten installiert."
-    else
-        log INFO "Python-venv ist einsatzbereit (${PYTHON_BIN})."
+    if ! "$VENV_PYTHON" -c "import qrbill" 2>/dev/null; then
+        log "INFO" "Installiere Python-Abhaengigkeiten in venv..."
+        "$VENV_PIP" install qrbill svglib reportlab cairosvg
+        log "SUCCESS" "Abhaengigkeiten installiert."
     fi
 }
 
@@ -680,7 +641,7 @@ generate_qr_bill() {
     local target="$2"
 
     # Modul-Verfuegbarkeit ist durch setup_python_env bereits sichergestellt.
-    "$PYTHON_BIN" - "$amount" "$target" <<'PYEOF'
+    "$VENV_PYTHON" - "$amount" "$target" <<'PYEOF'
 import sys
 from qrbill import QRBill
 
@@ -734,7 +695,7 @@ send_email() {
     EMAIL_RECIPIENT="$EMAIL_RECIPIENT" \
     EMAIL_SENDER_NAME="$EMAIL_SENDER_NAME" \
     EMAIL_SUBJECT="$EMAIL_SUBJECT" \
-    "$PYTHON_BIN" - "$attach" "$body" <<'PYEOF'
+    "$VENV_PYTHON" - "$attach" "$body" <<'PYEOF'
 import os, sys, smtplib, ssl
 from email.message import EmailMessage
 
@@ -846,7 +807,7 @@ is_server_running() {
     # lauscht. Wir nutzen Python (steht durch die venv garantiert bereit),
     # damit die Pruefung sowohl unter Linux als auch unter Windows-Bash
     # zuverlaessig funktioniert.
-    "$PYTHON_BIN" - "$SERVER_PORT" <<'PYEOF' >/dev/null 2>&1
+    "$VENV_PYTHON" - "$SERVER_PORT" <<'PYEOF' >/dev/null 2>&1
 import socket, sys
 port = int(sys.argv[1])
 s = socket.socket()
@@ -866,7 +827,7 @@ start_server_background() {
     log INFO "Starte Dashboard im Hintergrund -> $server_log"
     # nohup koppelt den Prozess vom Terminal ab, damit das Dashboard
     # weiterlaeuft, auch wenn das Skript endet.
-    nohup "$PYTHON_BIN" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
+    nohup "$VENV_PYTHON" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
     echo $! > "$pid_file"
     # Kurze Wartezeit, damit der Server hochfaehrt, bevor wir das Banner
     # mit der URL ausgeben.
@@ -913,7 +874,7 @@ maybe_start_dashboard() {
             fi
             ;;
         *)
-            log INFO "Dashboard nicht gestartet. Manuell mit: $PYTHON_BIN $SERVER_SCRIPT"
+            log INFO "Dashboard nicht gestartet. Manuell mit: $VENV_PYTHON $SERVER_SCRIPT"
             ;;
     esac
 }
@@ -923,7 +884,7 @@ maybe_start_dashboard() {
 # -----------------------------------------------------------------------------
 main() {
     auto_setup
-    # Python-Umgebung (venv + Pakete) muss vor jedem Aufruf von "$PYTHON_BIN"
+    # Python-Umgebung (venv + Pakete) muss vor jedem Aufruf von "$VENV_PYTHON"
     # bereitstehen, also direkt nach dem auto_setup einrichten.
     setup_python_env
     log INFO "=== DepotTracker Lauf gestartet ==="
