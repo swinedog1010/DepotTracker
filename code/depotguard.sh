@@ -818,8 +818,9 @@ bill = QRBill(
     },
     amount=amount,
     currency="CHF",
-    reference="000000000000000000000000273",
+    reference_number="210000000003139471430009017",
     additional_information="DepotTracker - Margin Call",
+    language="de",
 )
 bill.as_svg(target)
 PYEOF
