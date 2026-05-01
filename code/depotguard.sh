@@ -798,23 +798,23 @@ append_history() {
 # 14) QR-RECHNUNG (Schweizer QR-Bill)
 # -----------------------------------------------------------------------------
 generate_qr_bill() {
-    # generate_qr_bill <Betrag> <Zieldatei.svg>
-    # Erzeugt ueber ein eingebettetes Python-Snippet mit der Library "qrbill"
-    # eine SVG-Datei der Schweizer QR-Rechnung.
+    # generate_qr_bill <Betrag> <Zieldatei.pdf>
+    # Erzeugt eine druckfertige Schweizer QR-Rechnung als PDF.
+    # qrbill bietet selbst kein PDF-Output, daher der Zweischritt:
+    #   1) qrbill schreibt SVG in einen StringIO-Puffer
+    #   2) svglib konvertiert das SVG in ein ReportLab-Drawing
+    #   3) reportlab.graphics.renderPDF schreibt es als PDF auf die Disk
+    # Alle drei Module sind ueber requirements.txt in der venv installiert.
     local amount="$1"
     local target="$2"
-    # Alias, damit der wortwoertliche Check "[ ! -f "$OUTPUT_FILE" ]"
-    # weiter unten den richtigen Pfad sieht.
-    local OUTPUT_FILE="$target"
 
-    # "set -e" ist global aktiv. Wir muessen es fuer diesen Block kurz
-    # ausschalten, sonst bricht der Shell SOFORT ab, wenn Python einen
-    # ValueError wirft - und der explizite "if [ $? -ne 0 ]"-Check unten
-    # wuerde nie erreicht.
     set +e
-    "$VENV_PYTHON" - "$amount" "$OUTPUT_FILE" <<'PYEOF'
+    "$VENV_PYTHON" - "$amount" "$target" <<'PYEOF'
+import io
 import sys
 from qrbill import QRBill
+from svglib.svglib import svg2rlg
+from reportlab.graphics import renderPDF
 
 amount = sys.argv[1]
 target = sys.argv[2]
@@ -837,13 +837,23 @@ bill = QRBill(
     additional_information="DepotTracker - Margin Call",
     language="de",
 )
-bill.as_svg(target)
+
+# Schritt 1: SVG in einen Puffer schreiben (kein Tempfile noetig).
+svg_buf = io.StringIO()
+bill.as_svg(svg_buf)
+svg_bytes = svg_buf.getvalue().encode("utf-8")
+
+# Schritt 2 + 3: SVG -> Drawing -> PDF.
+drawing = svg2rlg(io.BytesIO(svg_bytes))
+if drawing is None:
+    raise RuntimeError("QR-Rechnung konnte nicht in PDF umgewandelt werden.")
+renderPDF.drawToFile(drawing, target)
 PYEOF
     if [ $? -ne 0 ] || [ ! -f "$target" ]; then
         echo "[ERROR] QR-Rechnung Erstellung fehlgeschlagen. Abbruch."
         exit 1
     fi
-    echo "[SUCCESS] QR-Rechnung erstellt: $target"
+    echo "[SUCCESS] QR-Rechnung (PDF) erstellt: $target"
     set -e
 }
 
@@ -851,13 +861,18 @@ PYEOF
 # 15) E-MAIL-VERSAND (mutt primaer, Python-SMTP als Fallback)
 # -----------------------------------------------------------------------------
 send_email() {
-    # send_email <Anhang> <Body-Datei>
+    # send_email <PDF-Anhang> <Text-Body-Datei> [<HTML-Body-Datei>]
+    # Drittes Argument ist optional - wird es uebergeben, wird die Mail
+    # als multipart/alternative versendet (Text + HTML-Variante).
     local attach="$1"
-    local body="$2"
+    local body_text="$2"
+    local body_html="${3:-}"
 
     # --- Primaer: mutt -------------------------------------------------------
+    # mutt versendet aus Stabilitaetsgruenden nur den Text-Body. Die HTML-
+    # Variante wird ausschliesslich vom Python-SMTP-Fallback gerendert.
     if command -v mutt >/dev/null 2>&1; then
-        if mutt -s "$EMAIL_SUBJECT" -a "$attach" -- "$EMAIL_RECIPIENT" < "$body"; then
+        if mutt -s "$EMAIL_SUBJECT" -a "$attach" -- "$EMAIL_RECIPIENT" < "$body_text"; then
             log SUCCESS "E-Mail via mutt versendet an $EMAIL_RECIPIENT"
             return 0
         fi
@@ -867,36 +882,48 @@ send_email() {
     fi
 
     # --- Fallback: Python smtplib (Gmail via SMTP_SSL auf Port 465) ----------
+    # Mit HTML-Body wird die Mail als multipart/alternative aufgebaut, der
+    # PDF-Anhang via msg.add_attachment(maintype="application", subtype="pdf").
     SMTP_SERVER="$SMTP_SERVER" SMTP_PORT="$SMTP_PORT" \
     SMTP_USER="$SMTP_USER" SMTP_PASS="$SMTP_PASS" \
     EMAIL_RECIPIENT="$EMAIL_RECIPIENT" \
     EMAIL_SENDER_NAME="$EMAIL_SENDER_NAME" \
     EMAIL_SUBJECT="$EMAIL_SUBJECT" \
-    "$VENV_PYTHON" - "$attach" "$body" <<'PYEOF'
+    "$VENV_PYTHON" - "$attach" "$body_text" "$body_html" <<'PYEOF'
 import os, sys, smtplib, ssl
 from email.message import EmailMessage
 
 attach_path = sys.argv[1]
-body_path   = sys.argv[2]
+text_path   = sys.argv[2]
+html_path   = sys.argv[3] if len(sys.argv) > 3 else ""
 
 msg = EmailMessage()
 msg["Subject"] = os.environ["EMAIL_SUBJECT"]
 msg["From"]    = f'{os.environ["EMAIL_SENDER_NAME"]} <{os.environ["SMTP_USER"]}>'
 msg["To"]      = os.environ["EMAIL_RECIPIENT"]
 
-with open(body_path, "r", encoding="utf-8") as f:
+# 1) Plain-Text als primaerer Body. Pflicht, damit die Nachricht auch
+#    in reinen Text-Clients (CLI-Mail-Reader, Spam-Filter-Preview) lesbar
+#    bleibt.
+with open(text_path, "r", encoding="utf-8") as f:
     msg.set_content(f.read())
 
+# 2) HTML-Variante als alternativer Body (multipart/alternative). Mail-
+#    Clients wie Gmail/Outlook zeigen die HTML-Version automatisch an.
+if html_path and os.path.isfile(html_path):
+    with open(html_path, "r", encoding="utf-8") as f:
+        msg.add_alternative(f.read(), subtype="html")
+
+# 3) Anhang. Endung steuert den MIME-Type - PDF ist hier der Standardfall.
 with open(attach_path, "rb") as f:
     data = f.read()
 fname = os.path.basename(attach_path)
-# Maintype/Subtype anhand der Endung. SVG/PNG/PDF werden alle unterstuetzt.
-if fname.endswith(".svg"):
+if fname.endswith(".pdf"):
+    maintype, subtype = "application", "pdf"
+elif fname.endswith(".svg"):
     maintype, subtype = "image", "svg+xml"
 elif fname.endswith(".png"):
     maintype, subtype = "image", "png"
-elif fname.endswith(".pdf"):
-    maintype, subtype = "application", "pdf"
 else:
     maintype, subtype = "application", "octet-stream"
 msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=fname)
@@ -932,8 +959,9 @@ handle_alarm() {
     fi
 
     # Zieldatei mit Zeitstempel - fuer das Web-Dashboard nachvollziehbar.
+    # Format: PDF (druckfertig), generiert ueber svglib + reportlab.
     local stamp; stamp="$(date +%Y%m%d_%H%M%S)"
-    local qr_file="${OUTPUT_DIR}/qrbill_${stamp}.svg"
+    local qr_file="${OUTPUT_DIR}/qrbill_${stamp}.pdf"
 
     # 1) QR-Rechnung erzeugen --------------------------------------------------
     if ! generate_qr_bill "$loss" "$qr_file"; then
@@ -944,26 +972,101 @@ handle_alarm() {
     # 2) Throttling vor dem E-Mail-Versand -------------------------------------
     sleep "$THROTTLE_SLEEP"
 
-    # 3) Body-Datei (temporaer) ------------------------------------------------
-    local body; body="$(mktemp)"; TMP_FILES="$TMP_FILES $body"
-    cat > "$body" <<EOF
+    # 3) Body-Dateien (temporaer): Plain-Text als Fallback, HTML als Haupt-
+    #    Darstellung. Beide werden an send_email gereicht und dort als
+    #    multipart/alternative verschickt.
+    local body_text body_html
+    body_text="$(mktemp)"; TMP_FILES="$TMP_FILES $body_text"
+    body_html="$(mktemp)"; TMP_FILES="$TMP_FILES $body_html"
+
+    local fiat_upper="${FIAT_CURRENCY^^}"
+
+    # ---------- Plain-Text-Variante (Fallback fuer Text-Clients) -------------
+    cat > "$body_text" <<EOF
+DepotTracker - Margin Call
+==========================
+
 Hallo,
 
 das DepotTracker-System hat einen Alarm ausgeloest.
 
-  Aktueller Depotwert : ${current} ${FIAT_CURRENCY^^}
-  Allzeithoch (ATH)   : ${ath} ${FIAT_CURRENCY^^}
-  Verlust             : ${loss} ${FIAT_CURRENCY^^} (${loss_pct} %)
-  Schwelle            : ${THRESHOLD_CHF} ${FIAT_CURRENCY^^}
+  Aktueller Depotwert : ${current} ${fiat_upper}
+  Allzeithoch (ATH)   : ${ath} ${fiat_upper}
+  Verlust             : ${loss} ${fiat_upper} (${loss_pct} %)
+  Schwelle            : ${THRESHOLD_CHF} ${fiat_upper}
 
-Im Anhang finden Sie eine Schweizer QR-Rechnung ueber den Differenzbetrag.
+Im Anhang finden Sie eine Schweizer QR-Rechnung als PDF
+ueber den Differenzbetrag.
 
 Freundliche Gruesse
 ${EMAIL_SENDER_NAME}
+
+--
+DepotTracker - LB3-Projekt 2026
+EOF
+
+    # ---------- HTML-Variante mit Inline-CSS (Haupt-Layout) ------------------
+    cat > "$body_html" <<EOF
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"><title>DepotTracker Alarm</title></head>
+<body style="margin:0;padding:0;background:#f4f6fa;font-family:Helvetica,Arial,sans-serif;color:#1a2238;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr><td align="center" style="padding:32px 12px;">
+      <table width="560" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 28px rgba(0,0,0,0.10);">
+
+        <tr><td style="background:linear-gradient(135deg,#ff5566,#ff8a8a);padding:26px 28px;color:#ffffff;">
+          <div style="font-size:12px;letter-spacing:1.6px;text-transform:uppercase;opacity:0.9;">DepotTracker &middot; Margin Call</div>
+          <div style="font-size:22px;font-weight:700;margin-top:6px;">&#9888;&#65039; Depotwert unter Schwelle</div>
+        </td></tr>
+
+        <tr><td style="padding:28px;">
+          <p style="margin:0 0 18px;font-size:15px;line-height:1.6;">
+            Hallo,<br><br>
+            der &uuml;berwachte Depotwert hat die kritische Schwelle <strong>unterschritten</strong>.
+            Bitte pr&uuml;fe deine Position umgehend.
+          </p>
+
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:18px 0;border-collapse:separate;border-spacing:0 6px;">
+            <tr><td style="padding:14px 16px;background:#fff1f3;border-left:4px solid #ff5566;border-radius:8px;">
+              <div style="font-size:11px;color:#a35761;text-transform:uppercase;letter-spacing:1.2px;">Aktueller Depotwert</div>
+              <div style="font-size:22px;font-weight:700;color:#ff5566;margin-top:4px;font-family:'Courier New',monospace;">${current} ${fiat_upper}</div>
+            </td></tr>
+            <tr><td style="padding:14px 16px;background:#f4f6fa;border-left:4px solid #cdd5e3;border-radius:8px;">
+              <div style="font-size:11px;color:#7e8aa3;text-transform:uppercase;letter-spacing:1.2px;">Allzeithoch (ATH)</div>
+              <div style="font-size:18px;font-weight:600;color:#1a2238;margin-top:4px;font-family:'Courier New',monospace;">${ath} ${fiat_upper}</div>
+            </td></tr>
+            <tr><td style="padding:14px 16px;background:#fff1f3;border-left:4px solid #ff5566;border-radius:8px;">
+              <div style="font-size:11px;color:#a35761;text-transform:uppercase;letter-spacing:1.2px;">Verlust vom ATH</div>
+              <div style="font-size:18px;font-weight:700;color:#ff5566;margin-top:4px;font-family:'Courier New',monospace;">&minus;${loss_pct} %</div>
+            </td></tr>
+            <tr><td style="padding:14px 16px;background:#f4f6fa;border-left:4px solid #cdd5e3;border-radius:8px;">
+              <div style="font-size:11px;color:#7e8aa3;text-transform:uppercase;letter-spacing:1.2px;">Schwellenwert</div>
+              <div style="font-size:18px;font-weight:600;color:#1a2238;margin-top:4px;font-family:'Courier New',monospace;">${THRESHOLD_CHF} ${fiat_upper}</div>
+            </td></tr>
+          </table>
+
+          <div style="background:#fff8e1;border-left:4px solid #f5a623;padding:14px 16px;border-radius:6px;margin-top:18px;">
+            <div style="font-size:13px;color:#6e5511;line-height:1.5;">
+              &#128206; Im Anhang findest du eine <strong>Schweizer QR-Rechnung als PDF</strong>
+              &uuml;ber den Differenzbetrag von <strong>${loss} ${fiat_upper}</strong>.
+            </div>
+          </div>
+        </td></tr>
+
+        <tr><td style="background:#0b0f1a;padding:16px 28px;text-align:center;font-size:12px;color:#7e8aa3;">
+          DepotTracker &middot; LB3-Projekt 2026 &middot; Philippe &amp; Viggo
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
 EOF
 
     # 4) E-Mail versenden ------------------------------------------------------
-    send_email "$qr_file" "$body" || true
+    send_email "$qr_file" "$body_text" "$body_html" || true
     log INFO "Alarm verarbeitet."
 }
 
