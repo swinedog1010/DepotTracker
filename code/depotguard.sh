@@ -179,12 +179,12 @@ log() {
 # -----------------------------------------------------------------------------
 prompt_for_recipient() {
     # Einziger interaktiver Schritt im Skript: fragt im Terminal nach der
-    # EMPFAENGER-Mail (vorher: Schritt 1 im Web-Modal). Wird nur ausgefuehrt,
-    # wenn recipient.json fehlt - bei spaeteren Cron-Laeufen also stumm.
-    [[ -f "$RECIPIENT_FILE" ]] && return 0
-
+    # EMPFAENGER-Mail. Wird BEI JEDEM Lauf ausgefuehrt - eine eventuell
+    # vorhandene recipient.json wird ungeprueft ueberschrieben, damit der
+    # Demo-Flow ("Lehrer tippt seine Mail ein") nie durch alte Cache-
+    # Daten ausgehebelt wird.
     if [[ ! -t 0 && ! -e /dev/tty ]]; then
-        log ERROR "recipient.json fehlt und keine TTY verfuegbar - bitte das Skript einmal manuell starten."
+        log ERROR "Keine TTY verfuegbar - Empfaenger-Abfrage nicht moeglich. Bitte interaktiv starten."
         exit 1
     fi
 
@@ -1106,6 +1106,61 @@ except OSError:
 PYEOF
 }
 
+kill_existing_server() {
+    # Beendet rigoros JEDEN Prozess, der entweder auf SERVER_PORT lauscht
+    # oder unser server.py ausfuehrt. So garantieren wir, dass der Lauf
+    # immer mit den AKTUELLEN JSON-Daten startet (depot_*.json, recipient.json,
+    # counter.json). Mehrere Methoden hintereinander, weil je nach Distri
+    # mal das eine, mal das andere Tool verfuegbar ist.
+    local killed=0
+
+    # 1) PID-Datei aus letztem Lauf -> gezielt beenden.
+    local pid_file="${SCRIPT_DIR}/server.pid"
+    if [[ -f "$pid_file" ]]; then
+        local old_pid
+        old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            log INFO "Beende alten Server-Prozess (PID $old_pid via server.pid)"
+            kill "$old_pid" 2>/dev/null || true
+            killed=1
+        fi
+        rm -f "$pid_file"
+    fi
+
+    # 2) fuser -k - SIGKILL fuer alle Prozesse am TCP-Port. Standardmittel
+    #    auf Ubuntu/WSL. Stiller Lauf via Redirects, da fuser sonst auf
+    #    STDERR raushaut.
+    if command -v fuser >/dev/null 2>&1; then
+        if fuser -k "${SERVER_PORT}/tcp" >/dev/null 2>&1; then
+            log INFO "Restprozesse auf Port ${SERVER_PORT} via fuser -k beendet."
+            killed=1
+        fi
+    fi
+
+    # 3) pkill -f - Sicherheitsnetz fuer Faelle, wo der Prozess auf einem
+    #    anderen Port haengt oder fuser nicht installiert ist.
+    if command -v pkill >/dev/null 2>&1; then
+        if pkill -f "$SERVER_SCRIPT" 2>/dev/null; then
+            log INFO "server.py-Prozesse via pkill beendet."
+            killed=1
+        fi
+    fi
+
+    # Wenn etwas geschossen wurde, kurz warten, bis der Port wirklich frei
+    # ist - sonst kollidiert der frische Start gleich wieder.
+    if (( killed == 1 )); then
+        local i
+        for i in 1 2 3 4 5; do
+            if ! is_server_running; then
+                return 0
+            fi
+            sleep 1
+        done
+        log WARN "Port ${SERVER_PORT} ist nach Kill noch belegt - frischer Start kann scheitern."
+    fi
+    return 0
+}
+
 start_server_background() {
     # Startet server.py im Hintergrund und legt PID + Logfile ab.
     local server_log="${LOG_DIR}/server.log"
@@ -1129,14 +1184,11 @@ start_server_background() {
 }
 
 maybe_start_dashboard() {
-    # Letzter Schritt im Skript: Dashboard SILENT hochfahren - keine
-    # Terminal-Abfrage mehr. Wenn der Webserver schon laeuft, einfach
-    # den Banner zeigen; sonst im Hintergrund starten und Banner zeigen.
-    if is_server_running; then
-        log INFO "Dashboard laeuft bereits auf $SERVER_URL"
-        print_success_banner
-        return 0
-    fi
+    # Letzter Schritt im Skript: Dashboard IMMER frisch starten. Alte
+    # Server-Prozesse werden zuerst rigoros beendet, damit der neue
+    # Server garantiert die aktuellen JSON-Daten ausliest und das
+    # Dashboard nicht aus einem veralteten In-Memory-Stand serviert.
+    kill_existing_server
 
     if start_server_background; then
         print_success_banner
