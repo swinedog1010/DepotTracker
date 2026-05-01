@@ -17,11 +17,13 @@
 # Start:  python server.py
 # =========================================================================
 
+from datetime import date
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, formataddr, make_msgid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import glob
 import io
 import json
 import os
@@ -30,6 +32,7 @@ import smtplib
 import ssl
 import sys
 import tempfile
+import time
 
 from qrbill import QRBill
 from svglib.svglib import svg2rlg
@@ -42,6 +45,14 @@ PORT = 8000
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEPOTGUARD_PATH = os.path.join(SCRIPT_DIR, "depotguard.sh")
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+
+# Local-First / API-Kontingent:
+# Tagesaktuelle Snapshots schreibt depotguard.sh nach SCRIPT_DIR/depot_YYYY-MM-DD.json.
+# counter.json (gleiches Verzeichnis) haelt den Tageszaehler. Beide Dateien
+# werden hier nur GELESEN - der Server stoesst keinen Online-Abruf an.
+COUNTER_PATH = os.path.join(SCRIPT_DIR, "counter.json")
+DAILY_API_LIMIT = 30
+SEND_TEST_EMAIL_THROTTLE_S = 0.75   # System-Throttling bei /send_test_email
 
 # SMTP-Konfiguration. SMTP_USER und SMTP_PASS werden beim Start aus
 # credentials.json geladen (siehe load_credentials) und koennen zur
@@ -190,11 +201,48 @@ def build_qr_bill_pdf():
 
 
 # =========================================================================
+# Local-First Snapshot-Lookup (read-only)
+# =========================================================================
+def today_snapshot_path():
+    """Pfad zur Tages-Snapshot-Datei fuer das HEUTIGE Datum."""
+    return os.path.join(SCRIPT_DIR, "depot_%s.json" % date.today().isoformat())
+
+
+def latest_snapshot_path():
+    """Liefert den juengsten verfuegbaren depot_YYYY-MM-DD.json oder None.
+
+    Wird genutzt, wenn fuer heute noch nichts vorliegt (z.B. depotguard.sh
+    lief noch nicht heute) - das Dashboard fallback'd dann auf den letzten
+    bekannten Stand statt einer leeren Antwort.
+    """
+    candidates = sorted(glob.glob(os.path.join(SCRIPT_DIR, "depot_*.json")))
+    return candidates[-1] if candidates else None
+
+
+def read_quota_state():
+    """Liest counter.json. Setzt count automatisch auf 0, wenn das Datum
+    nicht heute ist (Tageswechsel-Reset)."""
+    today = date.today().isoformat()
+    state = {"date": today, "count": 0, "limit": DAILY_API_LIMIT}
+    if not os.path.isfile(COUNTER_PATH):
+        return state
+    try:
+        with open(COUNTER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return state
+    if isinstance(data, dict) and data.get("date") == today:
+        state["count"] = int(data.get("count", 0))
+        state["limit"] = int(data.get("limit", DAILY_API_LIMIT))
+    return state
+
+
+# =========================================================================
 # Request-Handler
 # =========================================================================
 class DepotTrackerHandler(SimpleHTTPRequestHandler):
     """Liefert statische Dateien (via SimpleHTTPRequestHandler) und
-    behandelt zusaetzlich die beiden POST-Endpunkte."""
+    behandelt zusaetzlich die POST- und API-Endpunkte."""
 
     # ---------- POST-Routing -------------------------------------------------
     def do_POST(self):
@@ -206,6 +254,69 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
             self._handle_send_test_email()
         else:
             self._respond_json(404, False, "Endpunkt nicht gefunden.")
+
+    # ---------- GET-Routing --------------------------------------------------
+    def do_GET(self):
+        # API-Endpunkte werden VOR der statischen Auslieferung geprueft,
+        # sonst wuerde SimpleHTTPRequestHandler 404 zurueckgeben.
+        if self.path == "/api/depot":
+            self._handle_get_depot()
+            return
+        if self.path == "/api/quota":
+            self._handle_get_quota()
+            return
+        super().do_GET()
+
+    # ---------- /api/depot --------------------------------------------------
+    def _handle_get_depot(self):
+        """Local-First: gibt den heutigen Depot-Snapshot zurueck. Falls
+        heute noch keiner geschrieben wurde, faellt der Endpunkt auf den
+        letzten verfuegbaren zurueck und markiert das in der Antwort."""
+        path = today_snapshot_path()
+        stale = False
+        if not os.path.isfile(path):
+            fallback = latest_snapshot_path()
+            if fallback is None:
+                self._respond_json(
+                    404, False,
+                    "Noch kein Snapshot vorhanden - bitte depotguard.sh laufen lassen.",
+                )
+                return
+            path = fallback
+            stale = True
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as exc:
+            self._respond_json(500, False, "Snapshot nicht lesbar: %s" % exc)
+            return
+
+        # Snapshot-Body 1:1 weiterreichen (er kommt von depotguard.sh als JSON).
+        # Quelle und stale-Flag zusaetzlich als Header, damit das Frontend
+        # den Datenstand anzeigen kann, ohne das Body-Schema zu aendern.
+        payload = content.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Snapshot-Source", os.path.basename(path))
+        self.send_header("X-Snapshot-Stale", "1" if stale else "0")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    # ---------- /api/quota --------------------------------------------------
+    def _handle_get_quota(self):
+        """Liefert den aktuellen Stand des API-Tageszaehlers (read-only)."""
+        state = read_quota_state()
+        state["remaining"] = max(0, state["limit"] - state["count"])
+        payload = json.dumps(state, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     # ---------- Antwort-Hilfen ----------------------------------------------
     def _respond_json(self, code, success, error=None):
@@ -395,6 +506,11 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
         except Exception as exc:  # qrbill / svglib werfen breit gefaecherte Fehler
             self._respond_json(500, False, "QR-Rechnung-Fehler: %s" % exc)
             return
+
+        # System-Throttling: kurze Pause zwischen QR-Build und SMTP-Aufbau,
+        # um schnelle Mehrfachklicks im Dashboard nicht direkt nach Gmail
+        # weiterzureichen. time.sleep() entlastet zudem den Event-Loop.
+        time.sleep(SEND_TEST_EMAIL_THROTTLE_S)
 
         # MIME-Struktur:
         #   multipart/mixed

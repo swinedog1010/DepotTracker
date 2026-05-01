@@ -67,12 +67,22 @@ LOAD_THRESHOLD="2.0"      # CPU-Load-Grenze
 LOAD_MAX_RETRIES=5        # max. Wartezyklen bei hoher Last
 LOAD_SLEEP=10             # Pause in Sekunden zwischen Last-Pruefungen
 THROTTLE_SLEEP=2          # Pause zwischen QR-Rechnung und E-Mail
+STEP_DELAY=1              # Pause zwischen Hauptschritten (System-Throttling)
 API_RETRIES=3             # Wiederholungen pro Coin bei API-Fehler
 API_RETRY_DELAY=5         # Pause zwischen Wiederholungen
 API_TIMEOUT=10            # max. Wartezeit pro API-Call in Sekunden
 COIN_DELAY=3              # Pause zwischen einzelnen Coin-Abfragen
 THRESHOLD_CHF=1000        # Mindestwert des Depots in CHF
 LOSS_PERCENT_LIMIT=15     # max. zulaessiger Verlust in % vom ATH
+
+# --- API-Kontingent-Schutz (Local-First + Daily-Limit) ----------------------
+# Pro Kalendertag duerfen maximal DAILY_API_LIMIT Online-HTTP-Requests an
+# CoinGecko gestellt werden. Der Zaehler liegt in QUOTA_FILE und wird beim
+# Datumswechsel automatisch zurueckgesetzt. Tagesaktuelle Snapshots werden
+# als depot_YYYY-MM-DD.json abgelegt; existiert die Datei bereits, entfaellt
+# der Online-Abruf vollstaendig (Local-First).
+DAILY_API_LIMIT=30
+QUOTA_FILE="${SCRIPT_DIR}/counter.json"
 
 # --- Depot-Definition (assoziatives Array Coin -> Menge) --------------------
 declare -A DEPOT=(
@@ -436,6 +446,83 @@ cache_is_fresh() {
 }
 
 # -----------------------------------------------------------------------------
+# 8b) LOCAL-FIRST CACHE & API-KONTINGENT (counter.json)
+# -----------------------------------------------------------------------------
+daily_snapshot_path() {
+    # Liefert den Pfad zur Tages-Snapshot-Datei "depot_YYYY-MM-DD.json".
+    # Datum wird beim Aufruf neu gelesen, sodass auch lange Lauefe ueber
+    # Mitternacht hinaus auf den korrekten Tag schreiben.
+    printf "%s/depot_%s.json" "$SCRIPT_DIR" "$(date +%Y-%m-%d)"
+}
+
+quota_today_count() {
+    # Liest den Zaehler aus counter.json. Gibt 0 zurueck, wenn die Datei
+    # fehlt, beschaedigt ist oder das Datum nicht heute ist (automatischer
+    # Reset bei Tageswechsel).
+    if [[ ! -f "$QUOTA_FILE" ]]; then
+        echo "0"
+        return
+    fi
+    "$VENV_PYTHON" - "$QUOTA_FILE" <<'PYEOF'
+import json, sys
+from datetime import date
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if data.get("date") == str(date.today()):
+        print(int(data.get("count", 0)))
+    else:
+        print(0)
+except Exception:
+    print(0)
+PYEOF
+}
+
+quota_available() {
+    # Erfolgreich (0), wenn der heutige Zaehler noch unter dem Limit liegt.
+    local count
+    count="$(quota_today_count)"
+    (( count < DAILY_API_LIMIT ))
+}
+
+quota_increment() {
+    # Erhoeht den Zaehler atomar um 1 und gibt den NEUEN Stand auf STDOUT
+    # aus. Bei Datumswechsel wird der Zaehler implizit auf 1 zurueckgesetzt.
+    DAILY_API_LIMIT_ENV="$DAILY_API_LIMIT" \
+    "$VENV_PYTHON" - "$QUOTA_FILE" <<'PYEOF'
+import json, os, sys, tempfile
+from datetime import date
+target = sys.argv[1]
+today = str(date.today())
+limit = int(os.environ.get("DAILY_API_LIMIT_ENV", "30"))
+data = {"date": today, "count": 0, "limit": limit}
+if os.path.isfile(target):
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if existing.get("date") == today:
+            data["count"] = int(existing.get("count", 0))
+    except Exception:
+        pass
+data["count"] += 1
+data["limit"] = limit
+d = os.path.dirname(target) or "."
+fd, tmp = tempfile.mkstemp(prefix="counter.", suffix=".tmp", dir=d)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, target)
+except Exception:
+    if os.path.exists(tmp):
+        try: os.unlink(tmp)
+        except OSError: pass
+    sys.exit(1)
+print(data["count"])
+PYEOF
+}
+
+# -----------------------------------------------------------------------------
 # 9) JSON-PARSING (minimal, nur mit awk)
 # -----------------------------------------------------------------------------
 extract_price() {
@@ -484,6 +571,17 @@ fetch_prices() {
     {
         echo -n "{"
         for coin in "${!DEPOT[@]}"; do
+            # Pro Request prueft die Kontingent-Logik, ob noch Calls offen
+            # sind. Sobald das Tageslimit waehrend eines laufenden fetch
+            # erreicht ist, brechen wir kontrolliert ab - und der Fallback
+            # in load_prices uebernimmt.
+            if ! quota_available; then
+                local used; used="$(quota_today_count)"
+                log WARN "Tageslimit erreicht (${used}/${DAILY_API_LIMIT}) - fetch_prices abgebrochen."
+                rm -f "$tmp"
+                return 1
+            fi
+
             local resp; resp="$(mktemp)"; TMP_FILES="$TMP_FILES $resp"
             local ok=0 attempt=1
             while (( attempt <= API_RETRIES )); do
@@ -491,9 +589,14 @@ fetch_prices() {
                         --retry-connrefused -sf --max-time "$API_TIMEOUT" \
                         "${API_BASE}?ids=${coin}&vs_currencies=${FIAT_CURRENCY}" \
                         -o "$resp"; then
+                    # Erfolgreicher HTTP-Request -> Counter erhoehen.
+                    quota_increment >/dev/null
                     ok=1
                     break
                 else
+                    # Auch fehlgeschlagene Versuche zaehlen wir (sie
+                    # belasten ebenfalls das CoinGecko-Kontingent).
+                    quota_increment >/dev/null || true
                     log WARN "API-Fehler fuer $coin (Versuch ${attempt}/${API_RETRIES})"
                     sleep "$API_RETRY_DELAY"
                     (( attempt++ ))
@@ -551,22 +654,68 @@ fetch_prices() {
 }
 
 load_prices() {
-    # Stellt sicher, dass ein gueltiger Cache existiert. Bei API-Fehler wird
-    # ein vorhandener (alter) Cache als Fallback akzeptiert.
+    # Schutzkette:
+    #   1) Local-First   -> existiert depot_YYYY-MM-DD.json fuer HEUTE,
+    #                       wird er genutzt und KEIN Online-Call gemacht.
+    #   2) API-Kontingent -> haben wir heute bereits DAILY_API_LIMIT Calls
+    #                       gemacht, fallen wir auf den letzten Cache zurueck
+    #                       oder brechen kontrolliert ab.
+    #   3) Cache-Freshness -> price_cache.json juenger als CACHE_MAX_AGE
+    #                       erspart einen Online-Call innerhalb des Tages.
+    #   4) Online-Abruf   -> mit Throttling (sleep, retries, max_time).
+    #   5) Fehler-Fallback -> alter Cache wenn vorhanden, sonst Abbruch.
+    local daily
+    daily="$(daily_snapshot_path)"
+
+    # 1) Local-First ----------------------------------------------------------
+    if [[ -f "$daily" ]]; then
+        log INFO "Local-First: heutiger Snapshot gefunden ($daily) - kein Online-Abruf."
+        # Snapshot in price_cache.json spiegeln, damit extract_price funktioniert.
+        cp "$daily" "$CACHE_FILE"
+        return 0
+    fi
+
+    # 2) Kontingent-Schutz ----------------------------------------------------
+    if ! quota_available; then
+        local used
+        used="$(quota_today_count)"
+        log WARN "Tageslimit erreicht (${used}/${DAILY_API_LIMIT}) - Online-Abruf gesperrt."
+        if [[ -f "$CACHE_FILE" ]]; then
+            log WARN "Falle auf vorhandenen (ggf. alten) Cache zurueck."
+            return 0
+        fi
+        log ERROR "Tageslimit erreicht UND kein lokaler Cache - kontrollierter Abbruch."
+        exit 1
+    fi
+
+    # 3) Frische pruefen (zusaetzliche Schonung waehrend des Tages) ----------
     if cache_is_fresh; then
         log INFO "Cache aktuell - keine API-Abfrage noetig."
+        # Auch ohne Online-Call einen Tages-Snapshot anlegen, damit
+        # nachfolgende Laeufe Local-First greifen koennen.
+        cp "$CACHE_FILE" "$daily"
         return 0
     fi
 
+    # 4) Online-Abruf ---------------------------------------------------------
     if fetch_prices; then
+        # Tages-Snapshot atomar aus dem frisch geschriebenen Cache ableiten.
+        cp "$CACHE_FILE" "$daily"
+        log SUCCESS "Tages-Snapshot gespeichert: $daily"
+        # Kleine Pause nach erfolgreichem Online-Abruf - System-Throttling.
+        sleep "$STEP_DELAY"
         return 0
     fi
 
+    # 5) Fehler-Fallback ------------------------------------------------------
     if [[ -f "$CACHE_FILE" ]]; then
-        log WARN "API nicht erreichbar - nutze veralteten Cache."
+        log WARN "API-Fehler - nutze veralteten Cache (kein neuer Snapshot heute)."
+        # Nach API-Fehler eine deutlichere Pause, um nicht in eine schnelle
+        # Endlosschleife zu geraten, falls aufrufende Logik sofort wiederkommt.
+        sleep "$API_RETRY_DELAY"
         return 0
     fi
-    log ERROR "Keine Kursdaten verfuegbar - Abbruch."
+    log ERROR "API-Fehler UND kein lokaler Cache - kontrollierter Abbruch."
     exit 1
 }
 
@@ -894,11 +1043,14 @@ main() {
     load_credentials || true
 
     check_cpu_load
+    sleep "$STEP_DELAY"   # System-Throttling zwischen Schritten.
     load_prices
+    sleep "$STEP_DELAY"
 
     local total ath loss loss_pct status
     total="$(calculate_total)"
     log INFO "Gesamtwert Depot: $total $FIAT_CURRENCY"
+    sleep "$STEP_DELAY"
 
     ath="$(update_ath "$total")"
 
