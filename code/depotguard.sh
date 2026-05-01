@@ -824,10 +824,12 @@ bill = QRBill(
 )
 bill.as_svg(target)
 PYEOF
-    if [ $? -ne 0 ] || [ ! -f "$OUTPUT_FILE" ]; then echo "[ERROR] QR-Rechnung Erstellung fehlgeschlagen. Abbruch."; exit 1; fi
+    if [ $? -ne 0 ] || [ ! -f "$target" ]; then
+        echo "[ERROR] QR-Rechnung Erstellung fehlgeschlagen. Abbruch."
+        exit 1
+    fi
+    echo "[SUCCESS] QR-Rechnung erstellt: $target"
     set -e
-
-    log SUCCESS "QR-Rechnung erstellt: $target"
 }
 
 # -----------------------------------------------------------------------------
