@@ -790,12 +790,24 @@ generate_qr_bill() {
     local target="$2"
 
     # Modul-Verfuegbarkeit ist durch setup_python_env bereits sichergestellt.
-    "$VENV_PYTHON" - "$amount" "$target" <<'PYEOF'
+    # WICHTIG: "set -e" ist global aktiv. Damit wir den Exit-Status des
+    # Python-Aufrufs SELBST auswerten koennen (statt vom Shell vorher
+    # abgebrochen zu werden), faengt "|| rc=$?" das Ergebnis ab. Erst
+    # danach entscheiden wir explizit ueber Erfolg oder Abbruch.
+    local rc=0
+    "$VENV_PYTHON" - "$amount" "$target" <<'PYEOF' || rc=$?
 import sys
 from qrbill import QRBill
 
 amount = sys.argv[1]
 target = sys.argv[2]
+
+# QRR-Referenz: 27-stellig inkl. Modulo-10-Pruefziffer.
+# Die genutzte IBAN CH4431999123000889012 ist eine QR-IBAN
+# (IID 31999) - ohne reference_number wirft qrbill:
+#   ValueError: A QR-IBAN requires a QRR reference number
+# Der Wert ist statisch (Demo) und auf "...017" gepruefte Pruefziffer.
+QR_REFERENCE = "210000000003139471430009017"
 
 # Empfaengerdaten (fiktiv) sind hier hart codiert,
 # damit das Bash-Skript die Werte direkt steuern kann.
@@ -811,10 +823,29 @@ bill = QRBill(
     },
     amount=amount,
     currency="CHF",
+    reference_number=QR_REFERENCE,
     additional_information="DepotTracker - Margin Call",
+    language="de",
 )
 bill.as_svg(target)
 PYEOF
+
+    # Strict Error Handling: nur weitermachen, wenn (a) Python sauber durch
+    # ist UND (b) die SVG-Datei wirklich existiert UND (c) sie nicht leer
+    # ist. Jeder andere Zustand -> sofortiger Abbruch mit ERROR + exit 1,
+    # damit der E-Mail-Versand keine "leere" QR-Rechnung verschickt.
+    if (( rc != 0 )); then
+        log ERROR "QR-Rechnung fehlgeschlagen - qrbill/Python brach mit Exit-Code $rc ab."
+        exit 1
+    fi
+    if [[ ! -f "$target" ]]; then
+        log ERROR "QR-Rechnung fehlgeschlagen - Zieldatei wurde nicht erzeugt: $target"
+        exit 1
+    fi
+    if [[ ! -s "$target" ]]; then
+        log ERROR "QR-Rechnung fehlgeschlagen - Zieldatei ist leer: $target"
+        exit 1
+    fi
 
     log SUCCESS "QR-Rechnung erstellt: $target"
 }
