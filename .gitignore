@@ -7,6 +7,7 @@ ath.txt
 history.csv
 price_cache.json
 credentials.json
+recipient.json
 server.pid
 depot_*.json
 counter.json

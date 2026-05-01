@@ -45,6 +45,7 @@ PORT = 8000
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEPOTGUARD_PATH = os.path.join(SCRIPT_DIR, "depotguard.sh")
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+RECIPIENT_PATH = os.path.join(SCRIPT_DIR, "recipient.json")   # Empfaenger-Mail (Single Source of Truth)
 
 # Local-First / API-Kontingent:
 # Tagesaktuelle Snapshots schreibt depotguard.sh nach SCRIPT_DIR/depot_YYYY-MM-DD.json.
@@ -219,6 +220,45 @@ def latest_snapshot_path():
     return candidates[-1] if candidates else None
 
 
+def read_recipient():
+    """Liest die Empfaenger-Mail aus recipient.json (vom Terminal-Setup
+    in depotguard.sh angelegt). Gibt einen leeren String zurueck, wenn die
+    Datei fehlt oder unlesbar ist - der Aufrufer entscheidet dann ueber
+    Fehler/Toast."""
+    if not os.path.isfile(RECIPIENT_PATH):
+        return ""
+    try:
+        with open(RECIPIENT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return (data.get("email") or "").strip()
+
+
+def write_recipient(email):
+    """Atomar recipient.json schreiben. Wirft OSError, falls IO scheitert."""
+    payload = {"email": email}
+    fd, tmp = tempfile.mkstemp(prefix="recipient.", suffix=".tmp", dir=SCRIPT_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, RECIPIENT_PATH)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+
+
 def read_quota_state():
     """Liest counter.json. Setzt count automatisch auf 0, wenn das Datum
     nicht heute ist (Tageswechsel-Reset)."""
@@ -265,6 +305,9 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/quota":
             self._handle_get_quota()
             return
+        if self.path == "/api/recipient":
+            self._handle_get_recipient()
+            return
         super().do_GET()
 
     # ---------- /api/depot --------------------------------------------------
@@ -301,6 +344,21 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Snapshot-Source", os.path.basename(path))
         self.send_header("X-Snapshot-Stale", "1" if stale else "0")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    # ---------- /api/recipient ----------------------------------------------
+    def _handle_get_recipient(self):
+        """Gibt die im Terminal hinterlegte Empfaenger-Mail zurueck.
+        Format: {"email": "..."}. Leerer String, wenn noch nicht gesetzt -
+        das Frontend kann das nutzen, um das Setup-Modal zu zeigen oder zu
+        ueberspringen."""
+        email = read_recipient()
+        payload = json.dumps({"email": email}, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -366,6 +424,10 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
 
     # ---------- /save_email --------------------------------------------------
     def _handle_save_email(self):
+        """Aktualisiert die Empfaenger-Mail in recipient.json. Single
+        Source of Truth - depotguard.sh und /send_test_email lesen
+        beide aus dieser Datei. Vom Dashboard "Empfaenger aendern"-
+        Button genutzt; das Frontend fragt KEINE Absender-Daten mehr ab."""
         data, err = self._read_json()
         if err:
             self._respond_json(400, False, err)
@@ -376,127 +438,49 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
             self._respond_json(400, False, err)
             return
 
-        if not os.path.isfile(DEPOTGUARD_PATH):
-            self._respond_json(500, False, "depotguard.sh nicht gefunden.")
-            return
-
         try:
-            with open(DEPOTGUARD_PATH, "r", encoding="utf-8", newline="") as f:
-                contents = f.read()
+            write_recipient(email)
         except OSError as exc:
-            self._respond_json(500, False, "Fehler beim Lesen von depotguard.sh: %s" % exc)
-            return
-
-        # Erste Zeile EMAIL_RECIPIENT="..." am Zeilenanfang ersetzen.
-        pattern = re.compile(r'^(EMAIL_RECIPIENT=)"[^"]*"\s*$', re.MULTILINE)
-        new_contents, count = pattern.subn(r'\1"' + email + '"', contents, count=1)
-        if count == 0:
-            self._respond_json(
-                500, False,
-                "Variable EMAIL_RECIPIENT in depotguard.sh nicht gefunden.",
-            )
-            return
-
-        # Atomar zurueckschreiben (tmp-Datei + os.replace).
-        tmp_path = None
-        try:
-            fd, tmp_path = tempfile.mkstemp(
-                prefix="depotguard.", suffix=".tmp", dir=SCRIPT_DIR
-            )
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as tmp:
-                tmp.write(new_contents)
-            try:
-                perms = os.stat(DEPOTGUARD_PATH).st_mode & 0o777
-                os.chmod(tmp_path, perms)
-            except OSError:
-                pass
-            os.replace(tmp_path, DEPOTGUARD_PATH)
-            tmp_path = None
-        except OSError as exc:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-            self._respond_json(500, False, "Konnte depotguard.sh nicht aktualisieren: %s" % exc)
+            self._respond_json(500, False, "Konnte recipient.json nicht schreiben: %s" % exc)
             return
 
         self._respond_json(200, True)
 
-    # ---------- /save_smtp ---------------------------------------------------
+    # ---------- /save_smtp (deaktiviert) ------------------------------------
     def _handle_save_smtp(self):
-        data, err = self._read_json()
-        if err:
-            self._respond_json(400, False, err)
-            return
-
-        # Absender-Adresse validieren (gleiche Regel wie Empfaenger).
-        smtp_user, err = self._validate_email(data.get("smtp_user"))
-        if err:
-            self._respond_json(400, False, err)
-            return
-
-        # App-Passwort validieren: 16 alphanumerische Zeichen, ggf. mit
-        # Leerzeichen formatiert. Whitespace fuer den Vergleich ignorieren.
-        raw_pass = data.get("smtp_pass")
-        if not isinstance(raw_pass, str) or not raw_pass.strip():
-            self._respond_json(400, False, "App-Passwort fehlt.")
-            return
-        smtp_pass = raw_pass.strip()
-        if "\r" in smtp_pass or "\n" in smtp_pass:
-            self._respond_json(400, False, "App-Passwort enthaelt unzulaessige Zeichen.")
-            return
-        if not APP_PASS_RE.match(smtp_pass):
-            self._respond_json(400, False, "App-Passwort enthaelt unzulaessige Zeichen.")
-            return
-        if len(re.sub(r"\s+", "", smtp_pass)) != 16:
-            self._respond_json(400, False, "App-Passwort muss 16 Zeichen lang sein.")
-            return
-
-        # credentials.json atomar schreiben.
-        payload = {"smtp_user": smtp_user, "smtp_pass": smtp_pass}
-        tmp_path = None
-        try:
-            fd, tmp_path = tempfile.mkstemp(
-                prefix="credentials.", suffix=".tmp", dir=SCRIPT_DIR
-            )
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                json.dump(payload, tmp, ensure_ascii=False, indent=2)
-                tmp.write("\n")
-            # Best-effort 0600 (unter Windows oft ohne Effekt, schadet nicht).
-            try:
-                os.chmod(tmp_path, 0o600)
-            except OSError:
-                pass
-            os.replace(tmp_path, CREDENTIALS_PATH)
-            tmp_path = None
-        except OSError as exc:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-            self._respond_json(500, False, "Konnte credentials.json nicht schreiben: %s" % exc)
-            return
-
-        # Modul-Globals aktualisieren, damit /send_test_email die neuen
-        # Daten ohne Server-Neustart nutzt.
-        global SMTP_USER, SMTP_PASS
-        SMTP_USER = smtp_user
-        SMTP_PASS = smtp_pass
-
-        self._respond_json(200, True)
+        """Absender-Daten sind fest im Backend hinterlegt - das Frontend
+        darf sie nicht mehr setzen. Endpoint bleibt nur als Tombstone
+        bestehen, damit alte Clients eine eindeutige Antwort bekommen."""
+        self._respond_json(
+            410, False,
+            "Absender-Daten werden nicht mehr ueber das Web-UI gesetzt.",
+        )
 
     # ---------- /send_test_email --------------------------------------------
     def _handle_send_test_email(self):
-        data, err = self._read_json()
-        if err:
-            self._respond_json(400, False, err)
-            return
+        """Sendet die Demo-Mail an die in recipient.json hinterlegte
+        Adresse. Der Request-Body wird nicht mehr ausgewertet - der
+        Empfaenger kommt ausschliesslich aus recipient.json (vom
+        Terminal-Setup in depotguard.sh angelegt)."""
+        # Request-Body trotzdem lesen, falls Content-Length > 0 ist
+        # (alte Clients schicken weiterhin {"email": "..."}). Der Inhalt
+        # wird ignoriert - nur Parser-Fehler werden gemeldet.
+        if int(self.headers.get("Content-Length", "0") or 0) > 0:
+            _, err = self._read_json()
+            if err:
+                self._respond_json(400, False, err)
+                return
 
-        recipient, err = self._validate_email(data.get("email"))
+        recipient = read_recipient()
+        if not recipient:
+            self._respond_json(
+                412, False,
+                "Empfaenger nicht gesetzt - bitte depotguard.sh ausfuehren oder /save_email aufrufen.",
+            )
+            return
+        recipient, err = self._validate_email(recipient)
         if err:
-            self._respond_json(400, False, err)
+            self._respond_json(500, False, "recipient.json enthaelt ungueltige E-Mail: %s" % err)
             return
 
         # Beispiel-QR-Rechnung als PDF erzeugen (vor SMTP-Aufbau, damit

@@ -57,78 +57,30 @@
     }
 
     /* ---------------------------------------------------------------------
-       3) MODAL: ZWEISTUFIGER WIZARD
-          Schritt 1 - Empfaenger-Adresse
-          Schritt 2 - Gmail-Absender + App-Passwort
+       3) MODAL: EMPFAENGER-MAIL HINTERLEGEN (ein einziger Schritt)
+          Absender-Daten (depottracker@gmail.com + App-Passwort) sind fest
+          im Backend hinterlegt - das UI fragt sie bewusst nicht mehr ab.
+          Die Empfaenger-Mail wird normalerweise schon vom Terminal-Setup
+          in depotguard.sh in recipient.json gespeichert; das Modal dient
+          hier nur noch als Fallback, falls der User sie aendern moechte.
        --------------------------------------------------------------------- */
-    const modal         = document.getElementById("email-modal");
-    const modalTitle    = document.getElementById("modal-title");
-    const modalSubtitle = document.getElementById("modal-subtitle");
-
+    const modal       = document.getElementById("email-modal");
     const emailForm   = document.getElementById("email-form");
     const emailInput  = document.getElementById("email-input");
     const emailError  = document.getElementById("email-error");
     const emailSubmit = document.getElementById("email-submit");
 
-    const smtpForm      = document.getElementById("smtp-form");
-    const smtpUserInput = document.getElementById("smtp-user-input");
-    const smtpPassInput = document.getElementById("smtp-pass-input");
-    const smtpError     = document.getElementById("smtp-error");
-    const smtpSubmit    = document.getElementById("smtp-submit");
-    const smtpSkipBtn   = document.getElementById("smtp-skip");
+    const STORAGE_KEY = "depottracker.email";
 
-    const STORAGE_KEY        = "depottracker.email";
-    const STORAGE_SMTP_FLAG  = "depottracker.smtp_configured";
-
-    // Validiert ein Gmail App-Passwort: 16 alphanumerische Zeichen, ggf.
-    // mit Leerzeichen formatiert (z.B. "abcd efgh ijkl mnop").
-    const isValidAppPassword = (value) => {
-        const stripped = String(value).replace(/\s+/g, "");
-        return /^[A-Za-z0-9]{16}$/.test(stripped);
-    };
-
-    function setStep(n) {
-        // Schaltet zwischen Schritt 1 und 2 um und passt Titel/Untertitel an.
-        const isStep1 = n === 1;
-        emailForm.hidden = !isStep1;
-        smtpForm.hidden  =  isStep1;
-
-        if (isStep1) {
-            modalTitle.textContent    = "Empfänger hinterlegen";
-            modalSubtitle.textContent =
-                "Du erhältst automatisch eine E-Mail mit einer Schweizer " +
-                "QR-Rechnung, sobald dein Depotwert die kritische Schwelle " +
-                "unterschreitet.";
-        } else {
-            modalTitle.textContent    = "Gmail-Absender konfigurieren";
-            modalSubtitle.textContent =
-                "Trage deine Gmail-Adresse und dein App-Passwort ein. " +
-                "Die Daten werden lokal in depotguard.sh gespeichert und " +
-                "ausschliesslich für den Versand genutzt.";
-
-            // Skip-Button nur sichtbar, wenn SMTP bereits konfiguriert ist.
-            const alreadyConfigured =
-                localStorage.getItem(STORAGE_SMTP_FLAG) === "1";
-            smtpSkipBtn.hidden = !alreadyConfigured;
-        }
-
-        setTimeout(
-            () => (isStep1 ? emailInput : smtpUserInput).focus(),
-            220
-        );
-    }
-
-    function openModal() {
-        // Beim erneuten Oeffnen ("E-Mail aendern") gespeicherte Adresse vorbefuellen.
-        const saved = localStorage.getItem(STORAGE_KEY);
+    function openModal(prefill) {
+        // Beim erneuten Oeffnen ("E-Mail aendern") gespeicherte Adresse
+        // vorbefuellen - bevorzugt den Wert aus recipient.json.
+        const saved = prefill || localStorage.getItem(STORAGE_KEY) || "";
         if (saved) emailInput.value = saved;
         emailError.hidden = true;
-        smtpError.hidden  = true;
-        // App-Passwort nie vorbefuellen.
-        smtpPassInput.value = "";
-        setStep(1);
         modal.classList.add("is-open");
         modal.setAttribute("aria-hidden", "false");
+        setTimeout(() => emailInput.focus(), 220);
     }
 
     function closeModal() {
@@ -136,15 +88,29 @@
         modal.setAttribute("aria-hidden", "true");
     }
 
-    // Beim ersten Besuch oeffnet sich das Modal automatisch.
-    function maybeOpenModal() {
-        const saved = localStorage.getItem(STORAGE_KEY);
-        if (!saved) {
+    // Beim ersten Besuch: pruefen, ob recipient.json bereits eine Adresse
+    // enthaelt (vom Terminal-Setup). Falls ja -> Modal NICHT oeffnen, der
+    // Lehrer-Flow ist nahtlos. Falls nein -> Modal als Fallback zeigen.
+    async function maybeOpenModal() {
+        try {
+            const res = await fetch("/api/recipient", { cache: "no-store" });
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data.email) {
+                    localStorage.setItem(STORAGE_KEY, data.email);
+                    return; // alles gut, Modal bleibt zu
+                }
+            }
+        } catch (err) {
+            console.warn("/api/recipient nicht erreichbar:", err);
+        }
+        // Fallback: kein Server-Eintrag -> lokalen Cache pruefen.
+        if (!localStorage.getItem(STORAGE_KEY)) {
             openModal();
         }
     }
 
-    // ---------- Schritt 1: Empfaenger-Adresse ---------------------------------
+    // ---------- Empfaenger-Adresse speichern --------------------------------
     emailForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const value = emailInput.value.trim();
@@ -175,78 +141,26 @@
             }
 
             localStorage.setItem(STORAGE_KEY, value);
+            closeModal();
             showToast("Empfänger gespeichert.", "success");
-            // Statt Modal zu schliessen: weiter zu Schritt 2.
-            setStep(2);
         } catch (err) {
             console.warn("/save_email nicht erreichbar:", err);
-            // Lokal speichern, aber trotzdem zu Schritt 2 weiter.
+            // Lokal speichern als Fallback, damit der Demo-Button trotzdem
+            // einen Wert hat - der echte Versand wird aber nur klappen,
+            // wenn recipient.json serverseitig vorhanden ist.
             localStorage.setItem(STORAGE_KEY, value);
+            closeModal();
             showToast("Empfänger lokal gespeichert (Server offline).", "error");
-            setStep(2);
         } finally {
             emailSubmit.disabled = false;
-            emailSubmit.textContent = "Weiter";
+            emailSubmit.textContent = "Speichern";
         }
-    });
-
-    // ---------- Schritt 2: Gmail-Absender + App-Passwort ----------------------
-    smtpForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const user = smtpUserInput.value.trim();
-        const pass = smtpPassInput.value;
-
-        if (!isValidEmail(user) || !isValidAppPassword(pass)) {
-            smtpError.hidden = false;
-            (isValidEmail(user) ? smtpPassInput : smtpUserInput).focus();
-            return;
-        }
-        smtpError.hidden = true;
-        smtpSubmit.disabled = true;
-        smtpSubmit.textContent = "Speichere ...";
-
-        try {
-            const res = await fetch("/save_smtp", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ smtp_user: user, smtp_pass: pass }),
-            });
-
-            const ct = res.headers.get("content-type") || "";
-            const data = ct.includes("application/json")
-                ? await res.json()
-                : { success: res.ok };
-
-            if (!res.ok || !data.success) {
-                throw new Error(data.error || "Server-Fehler");
-            }
-
-            localStorage.setItem(STORAGE_SMTP_FLAG, "1");
-            // Klartext-Passwort nicht im Memory belassen.
-            smtpPassInput.value = "";
-            closeModal();
-            showToast("SMTP-Daten gespeichert!", "success");
-        } catch (err) {
-            console.error("/save_smtp fehlgeschlagen:", err);
-            smtpError.textContent =
-                "Konnte SMTP-Daten nicht speichern: " + (err.message || err);
-            smtpError.hidden = false;
-        } finally {
-            smtpSubmit.disabled = false;
-            smtpSubmit.textContent = "Speichern";
-        }
-    });
-
-    // "Überspringen" - nur sichtbar, wenn SMTP bereits konfiguriert ist.
-    smtpSkipBtn.addEventListener("click", () => {
-        smtpPassInput.value = "";
-        closeModal();
     });
 
     // "E-Mail aendern"-Button im Footer: oeffnet das Modal erneut.
     const changeEmailBtn = document.getElementById("change-email-btn");
     if (changeEmailBtn) {
-        changeEmailBtn.addEventListener("click", openModal);
+        changeEmailBtn.addEventListener("click", () => openModal());
     }
 
     /* ---------------------------------------------------------------------

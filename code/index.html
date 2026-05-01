@@ -22,13 +22,15 @@
 
     <!-- ====================================================================
          E-MAIL MODAL (oeffnet sich beim ersten Besuch automatisch)
-         Zwei Schritte: 1) Empfaenger-Adresse, 2) Gmail-Absender + App-Passwort
+         Einziger Schritt: Empfaenger-Adresse. Absender-Daten sind fest im
+         Backend (depotguard.sh / credentials.json) hinterlegt und werden
+         im Frontend bewusst nicht mehr abgefragt.
          ==================================================================== -->
     <div id="email-modal" class="modal-overlay" aria-hidden="true">
         <div class="modal-card" role="dialog" aria-labelledby="modal-title">
             <header class="modal-header">
                 <img src="logo/logo_depot.png" alt="DepotTracker Logo" class="modal-logo" />
-                <h2 id="modal-title">E-Mail-Adresse hinterlegen</h2>
+                <h2 id="modal-title">Empfänger-E-Mail hinterlegen</h2>
                 <p class="modal-subtitle" id="modal-subtitle">
                     Du erhältst automatisch eine E-Mail mit einer Schweizer
                     QR-Rechnung, sobald dein Depotwert die kritische Schwelle
@@ -36,9 +38,8 @@
                 </p>
             </header>
 
-            <!-- Schritt 1: Empfaenger-Adresse -->
+            <!-- Empfaenger-Adresse (einziger Schritt) -->
             <form id="email-form" class="modal-form" novalidate>
-                <span class="modal-stepper">Schritt 1 von 2</span>
                 <label for="email-input" class="modal-label">Empfänger-E-Mail</label>
                 <input
                     id="email-input"
@@ -52,51 +53,8 @@
                     Bitte geben Sie eine gültige E-Mail-Adresse ein.
                 </p>
                 <button type="submit" class="btn btn-primary" id="email-submit">
-                    Weiter
+                    Speichern
                 </button>
-            </form>
-
-            <!-- Schritt 2: Gmail-Absender + App-Passwort -->
-            <form id="smtp-form" class="modal-form" novalidate hidden>
-                <span class="modal-stepper">Schritt 2 von 2</span>
-                <label for="smtp-user-input" class="modal-label">Gmail-Adresse (Absender)</label>
-                <input
-                    id="smtp-user-input"
-                    name="smtp_user"
-                    type="email"
-                    placeholder="dein.name@gmail.com"
-                    autocomplete="username"
-                    required
-                />
-                <label for="smtp-pass-input" class="modal-label">App-Passwort (16 Zeichen)</label>
-                <input
-                    id="smtp-pass-input"
-                    name="smtp_pass"
-                    type="password"
-                    placeholder="abcd efgh ijkl mnop"
-                    autocomplete="off"
-                    spellcheck="false"
-                    required
-                />
-                <p class="modal-help">
-                    Kein App-Passwort?
-                    <a
-                        href="https://support.google.com/accounts/answer/185833"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >Hier in deinem Google-Konto erstellen.</a>
-                </p>
-                <p id="smtp-error" class="modal-error" hidden>
-                    Bitte gültige Gmail-Adresse und App-Passwort eingeben.
-                </p>
-                <div class="modal-actions">
-                    <button type="button" class="btn btn-secondary" id="smtp-skip" hidden>
-                        Überspringen
-                    </button>
-                    <button type="submit" class="btn btn-primary" id="smtp-submit">
-                        Speichern
-                    </button>
-                </div>
             </form>
         </div>
     </div>

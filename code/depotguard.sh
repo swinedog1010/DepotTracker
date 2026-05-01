@@ -60,6 +60,7 @@ CACHE_FILE="${SCRIPT_DIR}/price_cache.json"
 ATH_FILE="${SCRIPT_DIR}/ath.txt"
 HISTORY_FILE="${SCRIPT_DIR}/history.csv"
 CREDENTIALS_FILE="${SCRIPT_DIR}/credentials.json"
+RECIPIENT_FILE="${SCRIPT_DIR}/recipient.json"   # Empfaenger-Mail aus Terminal-Setup
 
 # --- Schwellenwerte und Zeitlimits ------------------------------------------
 CACHE_MAX_AGE=3600        # max. Cache-Alter in Sekunden (60 Minuten)
@@ -95,7 +96,10 @@ API_BASE="https://api.coingecko.com/api/v3/simple/price"
 FIAT_CURRENCY="chf"
 
 # --- E-Mail-Konfiguration ---------------------------------------------------
-EMAIL_RECIPIENT="philippesaxer8@gmail.com"
+# EMAIL_RECIPIENT wird zur Laufzeit aus recipient.json geladen (Terminal-Setup
+# beim ersten Start). Der Default bleibt leer, damit ein versehentliches
+# Versenden ohne Setup nicht moeglich ist.
+EMAIL_RECIPIENT=""
 EMAIL_SENDER_NAME="DepotTracker Alarm"
 EMAIL_SUBJECT="[DepotTracker] Margin Call - Depot unter Schwelle"
 
@@ -173,6 +177,85 @@ log() {
 # -----------------------------------------------------------------------------
 # 5) CREDENTIALS LADEN (credentials.json -> SMTP_USER/SMTP_PASS)
 # -----------------------------------------------------------------------------
+prompt_for_recipient() {
+    # Einziger interaktiver Schritt im Skript: fragt im Terminal nach der
+    # EMPFAENGER-Mail (vorher: Schritt 1 im Web-Modal). Wird nur ausgefuehrt,
+    # wenn recipient.json fehlt - bei spaeteren Cron-Laeufen also stumm.
+    [[ -f "$RECIPIENT_FILE" ]] && return 0
+
+    if [[ ! -t 0 && ! -e /dev/tty ]]; then
+        log ERROR "recipient.json fehlt und keine TTY verfuegbar - bitte das Skript einmal manuell starten."
+        exit 1
+    fi
+
+    printf "\n%b┌─ DepotTracker Setup ─────────────────────────────────────┐%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ An welche E-Mail-Adresse soll der Alarm verschickt werden?│%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ (Absender-Daten sind fest hinterlegt - du brauchst nur    │%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│  die Empfaenger-Adresse einzugeben.)                      │%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b└───────────────────────────────────────────────────────────┘%b\n\n" "$C_YELLOW" "$C_RESET"
+
+    local email="" attempt
+    for attempt in 1 2 3; do
+        printf "Empfaenger-E-Mail: "
+        if ! IFS= read -r email </dev/tty; then
+            log ERROR "Keine Eingabe erhalten - Setup abgebrochen."
+            exit 1
+        fi
+        # Whitespace trimmen.
+        email="${email#"${email%%[![:space:]]*}"}"
+        email="${email%"${email##*[![:space:]]}"}"
+
+        if [[ "$email" =~ ^[^[:space:]@\"\'\`\\]+@[^[:space:]@\"\'\`\\]+\.[^[:space:]@\"\'\`\\]{2,}$ ]]; then
+            break
+        fi
+        printf "%bUngueltige E-Mail. Bitte nochmal.%b\n\n" "$C_RED" "$C_RESET"
+        email=""
+    done
+
+    if [[ -z "$email" ]]; then
+        log ERROR "Drei Fehlversuche - Setup abgebrochen."
+        exit 1
+    fi
+
+    # JSON atomar schreiben. Die validierte E-Mail enthaelt keine
+    # JSON-Sonderzeichen (kein ", \, Whitespace), daher kein Escaping noetig.
+    local tmp
+    tmp="$(mktemp)"; TMP_FILES="$TMP_FILES $tmp"
+    printf '{\n  "email": "%s"\n}\n' "$email" > "$tmp"
+    mv "$tmp" "$RECIPIENT_FILE"
+    log SUCCESS "Empfaenger gespeichert ($email) -> $RECIPIENT_FILE"
+}
+
+load_recipient() {
+    # Liest die Empfaenger-Mail aus recipient.json in EMAIL_RECIPIENT.
+    # Fehlt die Datei oder ist sie leer, bleibt EMAIL_RECIPIENT leer und
+    # der Alarm-Pfad ueberspringt den Versand mit klarer Logmeldung.
+    if [[ ! -f "$RECIPIENT_FILE" ]]; then
+        log WARN "recipient.json fehlt - kein Empfaenger fuer Alarm-Mails."
+        return 1
+    fi
+    EMAIL_RECIPIENT="$("$VENV_PYTHON" - "$RECIPIENT_FILE" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print((data.get("email") or "").strip())
+except Exception:
+    sys.exit(1)
+PYEOF
+    )" || {
+        log WARN "recipient.json konnte nicht gelesen werden."
+        EMAIL_RECIPIENT=""
+        return 1
+    }
+    if [[ -z "$EMAIL_RECIPIENT" ]]; then
+        log WARN "recipient.json enthaelt keine gueltige E-Mail."
+        return 1
+    fi
+    log INFO "Empfaenger geladen: $EMAIL_RECIPIENT"
+    return 0
+}
+
 ensure_credentials_file() {
     # Legt credentials.json STILL (ohne jede Benutzerinteraktion) an,
     # falls die Datei fehlt - mit den projektweit fest hinterlegten
@@ -842,6 +925,12 @@ handle_alarm() {
 
     log ALARM "ALARM ausgeloest - Depotwert: $current $FIAT_CURRENCY (-${loss_pct}% vom ATH ${ath})"
 
+    # Empfaenger-Schutz: ohne EMAIL_RECIPIENT kein Versand, sonst SMTP-Fehler.
+    if [[ -z "$EMAIL_RECIPIENT" ]]; then
+        log WARN "Kein Empfaenger gesetzt (recipient.json fehlt) - Alarm-Mail uebersprungen."
+        return 0
+    fi
+
     # Zieldatei mit Zeitstempel - fuer das Web-Dashboard nachvollziehbar.
     local stamp; stamp="$(date +%Y%m%d_%H%M%S)"
     local qr_file="${OUTPUT_DIR}/qrbill_${stamp}.svg"
@@ -958,13 +1047,18 @@ maybe_start_dashboard() {
 # -----------------------------------------------------------------------------
 main() {
     auto_setup
+    # Einziger interaktiver Schritt: Empfaenger-Mail abfragen, falls noch
+    # keine recipient.json existiert. Bewusst VOR setup_python_env, damit
+    # der User nicht erst auf die venv-Installation warten muss.
+    prompt_for_recipient
     # Python-Umgebung (venv + Pakete) muss vor jedem Aufruf von "$VENV_PYTHON"
     # bereitstehen, also direkt nach dem auto_setup einrichten.
     setup_python_env
     log INFO "=== DepotTracker Lauf gestartet ==="
 
-    # SMTP-Credentials werden best-effort geladen; fehlende Datei ist kein
-    # harter Fehler - der Alarm-Pfad logged dann eine eindeutige Meldung.
+    # Empfaenger und SMTP-Credentials laden (beide best-effort - im Fehlerfall
+    # wird im Alarm-Pfad eine klare Meldung geloggt und der Versand uebersprungen).
+    load_recipient || true
     load_credentials || true
 
     check_cpu_load
