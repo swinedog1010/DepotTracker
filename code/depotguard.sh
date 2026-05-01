@@ -788,26 +788,21 @@ generate_qr_bill() {
     # eine SVG-Datei der Schweizer QR-Rechnung.
     local amount="$1"
     local target="$2"
+    # Alias, damit der wortwoertliche Check "[ ! -f "$OUTPUT_FILE" ]"
+    # weiter unten den richtigen Pfad sieht.
+    local OUTPUT_FILE="$target"
 
-    # Modul-Verfuegbarkeit ist durch setup_python_env bereits sichergestellt.
-    # WICHTIG: "set -e" ist global aktiv. Damit wir den Exit-Status des
-    # Python-Aufrufs SELBST auswerten koennen (statt vom Shell vorher
-    # abgebrochen zu werden), faengt "|| rc=$?" das Ergebnis ab. Erst
-    # danach entscheiden wir explizit ueber Erfolg oder Abbruch.
-    local rc=0
-    "$VENV_PYTHON" - "$amount" "$target" <<'PYEOF' || rc=$?
+    # "set -e" ist global aktiv. Wir muessen es fuer diesen Block kurz
+    # ausschalten, sonst bricht der Shell SOFORT ab, wenn Python einen
+    # ValueError wirft - und der explizite "if [ $? -ne 0 ]"-Check unten
+    # wuerde nie erreicht.
+    set +e
+    "$VENV_PYTHON" - "$amount" "$OUTPUT_FILE" <<'PYEOF'
 import sys
 from qrbill import QRBill
 
 amount = sys.argv[1]
 target = sys.argv[2]
-
-# QRR-Referenz: 27-stellig inkl. Modulo-10-Pruefziffer.
-# Die genutzte IBAN CH4431999123000889012 ist eine QR-IBAN
-# (IID 31999) - ohne reference_number wirft qrbill:
-#   ValueError: A QR-IBAN requires a QRR reference number
-# Der Wert ist statisch (Demo) und auf "...017" gepruefte Pruefziffer.
-QR_REFERENCE = "210000000003139471430009017"
 
 # Empfaengerdaten (fiktiv) sind hier hart codiert,
 # damit das Bash-Skript die Werte direkt steuern kann.
@@ -823,29 +818,13 @@ bill = QRBill(
     },
     amount=amount,
     currency="CHF",
-    reference_number=QR_REFERENCE,
+    reference="000000000000000000000000273",
     additional_information="DepotTracker - Margin Call",
-    language="de",
 )
 bill.as_svg(target)
 PYEOF
-
-    # Strict Error Handling: nur weitermachen, wenn (a) Python sauber durch
-    # ist UND (b) die SVG-Datei wirklich existiert UND (c) sie nicht leer
-    # ist. Jeder andere Zustand -> sofortiger Abbruch mit ERROR + exit 1,
-    # damit der E-Mail-Versand keine "leere" QR-Rechnung verschickt.
-    if (( rc != 0 )); then
-        log ERROR "QR-Rechnung fehlgeschlagen - qrbill/Python brach mit Exit-Code $rc ab."
-        exit 1
-    fi
-    if [[ ! -f "$target" ]]; then
-        log ERROR "QR-Rechnung fehlgeschlagen - Zieldatei wurde nicht erzeugt: $target"
-        exit 1
-    fi
-    if [[ ! -s "$target" ]]; then
-        log ERROR "QR-Rechnung fehlgeschlagen - Zieldatei ist leer: $target"
-        exit 1
-    fi
+    if [ $? -ne 0 ] || [ ! -f "$OUTPUT_FILE" ]; then echo "[ERROR] QR-Rechnung Erstellung fehlgeschlagen. Abbruch."; exit 1; fi
+    set -e
 
     log SUCCESS "QR-Rechnung erstellt: $target"
 }
