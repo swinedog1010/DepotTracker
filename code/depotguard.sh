@@ -173,72 +173,16 @@ log() {
 # -----------------------------------------------------------------------------
 # 5) CREDENTIALS LADEN (credentials.json -> SMTP_USER/SMTP_PASS)
 # -----------------------------------------------------------------------------
-prompt_for_credentials() {
-    # Fragt im Terminal interaktiv nach Gmail-Adresse + App-Passwort und
-    # legt anschliessend credentials.json an. Wird nur aufgerufen, wenn die
-    # Datei fehlt UND wir auf einem echten Terminal laufen (kein Cron).
-    # Die Eingabe von /dev/tty erfolgt deshalb explizit, damit die Prompts
-    # auch sichtbar sind, falls STDIN umgeleitet ist (z.B. via "| tee log").
+ensure_credentials_file() {
+    # Legt credentials.json STILL (ohne jede Benutzerinteraktion) an,
+    # falls die Datei fehlt - mit den projektweit fest hinterlegten
+    # DepotTracker-Zugangsdaten. So laeuft das Skript sowohl im Cronjob
+    # als auch bei der Schul-Abgabe komplett ohne Terminal-Prompt durch.
+    [[ -f "$CREDENTIALS_FILE" ]] && return 0
 
-    local email pass_raw pass_clean confirm
-    printf "\n%b┌─ Gmail-Zugangsdaten einrichten ────────────────────────────┐%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b│ credentials.json fehlt. Ich lege sie jetzt fuer dich an.    │%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b│ Du brauchst ein Google-App-Passwort (16 Zeichen).           │%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b└─────────────────────────────────────────────────────────────┘%b\n\n" "$C_YELLOW" "$C_RESET"
-
-    # 3 Versuche fuer eine valide Eingabe -----------------------------------
-    local attempt
-    for attempt in 1 2 3; do
-        # E-Mail einlesen.
-        printf "Gmail-Adresse: "
-        if ! IFS= read -r email </dev/tty; then
-            log WARN "Eingabe abgebrochen - keine credentials.json erstellt."
-            return 1
-        fi
-        # Trim Whitespace.
-        email="${email#"${email%%[![:space:]]*}"}"
-        email="${email%"${email##*[![:space:]]}"}"
-
-        # Sehr einfache Plausibilitaetspruefung. Strenge Validierung uebernimmt
-        # spaeter ohnehin /save_smtp im Server, falls es ueber das UI passiert.
-        if [[ ! "$email" =~ ^[^[:space:]@\"\'\`\\]+@[^[:space:]@\"\'\`\\]+\.[^[:space:]@\"\'\`\\]{2,}$ ]]; then
-            printf "%bUngueltige E-Mail. Bitte nochmal.%b\n\n" "$C_RED" "$C_RESET"
-            continue
-        fi
-
-        # App-Passwort einlesen (verdeckt). "-s" unterdrueckt das Echo;
-        # echo am Ende erzwingt einen Zeilenumbruch.
-        printf "Google-App-Passwort (16 Zeichen, Eingabe ist verdeckt): "
-        if ! IFS= read -rs pass_raw </dev/tty; then
-            printf "\n"
-            log WARN "Eingabe abgebrochen - keine credentials.json erstellt."
-            return 1
-        fi
-        printf "\n"
-
-        # Whitespace fuer die Laengenpruefung entfernen, im Speicher aber das
-        # vom Nutzer eingegebene Format behalten (Google zeigt 4er-Gruppen).
-        pass_clean="${pass_raw// /}"
-        if [[ ! "$pass_clean" =~ ^[A-Za-z0-9]{16}$ ]]; then
-            printf "%bUngueltiges App-Passwort (16 alphanumerische Zeichen erwartet).%b\n\n" "$C_RED" "$C_RESET"
-            continue
-        fi
-
-        # Bestaetigung nur fuer die E-Mail (Passwort wird nicht erneut gezeigt).
-        printf "Speichere Absender %s? [Y/n] " "$email"
-        if ! IFS= read -r confirm </dev/tty; then
-            confirm="n"
-        fi
-        confirm="${confirm:-Y}"
-        case "$confirm" in
-            [Yy]*) ;;
-            *) printf "Abgebrochen.\n\n"; continue ;;
-        esac
-
-        # credentials.json atomar schreiben - via Python, um JSON-Escaping
-        # korrekt zu handhaben, ohne externe Tools wie jq vorauszusetzen.
-        if SMTP_USER_INPUT="$email" SMTP_PASS_INPUT="$pass_raw" \
-            "$VENV_PYTHON" - "$CREDENTIALS_FILE" <<'PYEOF'
+    SMTP_USER_INPUT="depottracker@gmail.com" \
+    SMTP_PASS_INPUT="ymas qwaw sfde dyfs" \
+    "$VENV_PYTHON" - "$CREDENTIALS_FILE" <<'PYEOF'
 import json, os, sys, tempfile
 target = sys.argv[1]
 data = {
@@ -252,7 +196,7 @@ try:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
     try:
-        os.chmod(tmp, 0o600)   # best effort - keine Wirkung unter Windows
+        os.chmod(tmp, 0o600)   # best effort - unter Windows ohne Wirkung
     except OSError:
         pass
     os.replace(tmp, target)
@@ -263,34 +207,22 @@ except Exception as exc:
     sys.stderr.write(f"credentials.json konnte nicht geschrieben werden: {exc}\n")
     sys.exit(1)
 PYEOF
-        then
-            log SUCCESS "credentials.json wurde angelegt ($email)."
-            return 0
-        else
-            log ERROR "credentials.json konnte nicht geschrieben werden."
-            return 1
-        fi
-    done
 
-    log WARN "Drei Fehlversuche - credentials.json wurde NICHT erstellt."
+    if [[ -f "$CREDENTIALS_FILE" ]]; then
+        log INFO "credentials.json silent angelegt (depottracker@gmail.com)."
+        return 0
+    fi
+    log ERROR "credentials.json konnte nicht angelegt werden."
     return 1
 }
 
 load_credentials() {
-    # Liest die Gmail-Credentials aus credentials.json. Diese Datei wird
-    # ausserhalb von Git gehalten (siehe .gitignore) und entweder manuell
-    # aus credentials.example.json erstellt, ueber das Web-Modal
-    # (server.py /save_smtp) befuellt - oder beim ersten interaktiven Lauf
-    # direkt hier per Terminal-Prompt.
+    # Stellt sicher, dass credentials.json existiert (silent-Fallback ueber
+    # ensure_credentials_file) und liest dann SMTP_USER + SMTP_PASS aus.
+    # Es gibt KEINE Terminal-Abfrage - das Skript darf nirgends auf eine
+    # Benutzereingabe warten.
     if [[ ! -f "$CREDENTIALS_FILE" ]]; then
-        # Nur fragen, wenn ein Terminal vorhanden ist. Cron-Laeufe sollen
-        # nicht stillschweigend haengen bleiben.
-        if [[ -t 0 || -e /dev/tty ]]; then
-            if ! prompt_for_credentials; then
-                return 1
-            fi
-        else
-            log WARN "credentials.json fehlt - SMTP-Versand nicht moeglich."
+        if ! ensure_credentials_file; then
             return 1
         fi
     fi
@@ -1005,40 +937,20 @@ start_server_background() {
 }
 
 maybe_start_dashboard() {
-    # Letzter Schritt im Skript: Wenn der Webserver schon laeuft, einfach
-    # den Banner zeigen. Sonst (interaktiv) nachfragen, ob er gestartet
-    # werden soll. Nicht-interaktive Laeufe (Cron) bleiben stumm und
-    # starten den Server NICHT - das waere fuer einen Cron-Lauf falsch.
+    # Letzter Schritt im Skript: Dashboard SILENT hochfahren - keine
+    # Terminal-Abfrage mehr. Wenn der Webserver schon laeuft, einfach
+    # den Banner zeigen; sonst im Hintergrund starten und Banner zeigen.
     if is_server_running; then
         log INFO "Dashboard laeuft bereits auf $SERVER_URL"
         print_success_banner
         return 0
     fi
 
-    if [[ ! -t 0 ]]; then
-        log INFO "Nicht-interaktiver Lauf - Dashboard wird nicht automatisch gestartet."
-        return 0
+    if start_server_background; then
+        print_success_banner
+    else
+        log WARN "Dashboard-Start unsicher - Logs: ${LOG_DIR}/server.log"
     fi
-
-    local answer=""
-    printf "\n%bDashboard ist nicht aktiv. Jetzt starten? [Y/n] %b" "$C_YELLOW" "$C_RESET"
-    if ! read -r answer; then
-        answer="n"
-    fi
-    answer="${answer:-Y}"
-
-    case "$answer" in
-        [Yy]*)
-            if start_server_background; then
-                print_success_banner
-            else
-                log WARN "Dashboard-Start unsicher - Logs: ${LOG_DIR}/server.log"
-            fi
-            ;;
-        *)
-            log INFO "Dashboard nicht gestartet. Manuell mit: $VENV_PYTHON $SERVER_SCRIPT"
-            ;;
-    esac
 }
 
 # -----------------------------------------------------------------------------
