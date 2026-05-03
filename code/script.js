@@ -3,7 +3,7 @@
    --------------------------------------------------------------------------
    Steuert das Dashboard: Modal, Counter-Animationen, Status-Indikator,
    Chart, Tabelle "Letzte Laeufe", Fortschrittsbalken und Scan-Button.
-   Saemtliche Texte und Kommentare in Schweizer Schreibweise (ss statt ß).
+   Saemtliche Texte und Kommentare in Schweizer Schreibweise (ss, kein Eszett).
    ========================================================================= */
 
 (() => {
@@ -165,33 +165,57 @@
 
     /* ---------------------------------------------------------------------
        3b) MODUS-BADGE (Feature 1) + GPG-Indikator (Feature 2)
-           Pollt /api/mode und schaltet das Header-Badge zwischen LIVE
-           und DEMO um. Der GPG-Indikator wird sichtbar, sobald das
-           Backend meldet, dass credentials.json.gpg vorhanden ist.
+           Pollt /api/mode und schaltet das Header-Badge zwischen LIVE,
+           SIMULATION und READ-ONLY um. Der GPG-Indikator wird sichtbar,
+           sobald das Backend meldet, dass credentials.json.gpg vorhanden
+           ist. Im READ-ONLY-Modus wird zusaetzlich body.is-readonly
+           gesetzt, was alle Schreib-Buttons (Demo-Mail, Scan, Empfaenger
+           aendern) deaktiviert.
        --------------------------------------------------------------------- */
     const modeBadge = document.getElementById("mode-badge");
     const modeLabel = document.getElementById("mode-label");
     const encBadge  = document.getElementById("enc-badge");
-    let lastMode    = null;
+    const VALID_MODES = ["live", "simulation", "read-only"];
+    const MODE_LABELS = {
+        "live":      "LIVE",
+        "simulation":"SIMULATION",
+        "read-only": "READ-ONLY",
+    };
+    let lastMode = null;
+
+    function applyModeLock(mode) {
+        // body-Klasse fuer CSS + harte Disable-Flags fuer Schreib-Buttons.
+        const ro = (mode === "read-only");
+        document.body.classList.toggle("is-readonly", ro);
+        const writeButtons = [
+            document.getElementById("scan-now-btn"),
+            document.getElementById("demo-email-btn"),
+            document.getElementById("change-email-btn"),
+        ].filter(Boolean);
+        writeButtons.forEach((b) => { b.disabled = ro; });
+    }
 
     async function refreshMode() {
         try {
             const res = await fetch("/api/mode", { cache: "no-store" });
             if (!res.ok) return;
             const data = await res.json();
-            const mode = (data && data.mode) === "demo" ? "demo" : "live";
+            const raw = (data && data.mode) || "read-only";
+            const mode = VALID_MODES.includes(raw) ? raw : "read-only";
 
             if (mode !== lastMode) {
-                modeBadge.classList.toggle("mode-live", mode === "live");
-                modeBadge.classList.toggle("mode-demo", mode === "demo");
-                modeLabel.textContent = mode === "demo" ? "DEMO" : "LIVE";
+                modeBadge.classList.remove("mode-live", "mode-simulation", "mode-readonly");
+                modeBadge.classList.add(
+                    mode === "live" ? "mode-live" :
+                    mode === "simulation" ? "mode-simulation" : "mode-readonly"
+                );
+                modeLabel.textContent = MODE_LABELS[mode];
+                applyModeLock(mode);
                 if (lastMode !== null) {
-                    showToast(
-                        mode === "demo"
-                            ? "Modus gewechselt: DEMO (Force-Alarm aktiv)"
-                            : "Modus gewechselt: LIVE",
-                        mode === "demo" ? "error" : "success"
-                    );
+                    const toastType = mode === "live" ? "error"
+                                    : mode === "simulation" ? "error"
+                                    : "success";
+                    showToast("Modus gewechselt: " + MODE_LABELS[mode], toastType);
                 }
                 lastMode = mode;
             }
@@ -204,33 +228,43 @@
         }
     }
 
+    /* Paper-Trading-Karte (Feature 1, Simulationsmodus) - polled die
+       Paper-Daten und schaltet die Card sichtbar, sobald paper_depot.json
+       existiert. Andernfalls bleibt sie ausgeblendet. */
+    const paperCard    = document.getElementById("paper-card");
+    const paperBalance = document.getElementById("paper-balance");
+    const paperSub     = document.getElementById("paper-sub");
+
+    async function refreshPaper() {
+        if (!paperCard) return;
+        try {
+            const res = await fetch("/api/paper", { cache: "no-store" });
+            if (!res.ok) { paperCard.hidden = true; return; }
+            const data = await res.json();
+            if (!data.exists) { paperCard.hidden = true; return; }
+            paperBalance.textContent = formatCHF(data.balance_chf) + " CHF";
+            paperSub.textContent = "Start: " + formatCHF(data.starting_balance_chf) + " CHF";
+            paperCard.hidden = false;
+        } catch (err) {
+            paperCard.hidden = true;
+        }
+    }
+
     /* ---------------------------------------------------------------------
-       3c) FX-ANZEIGE (Feature 3)
-           Liest /api/fx und zeigt das USD-/EUR-Aequivalent des aktuellen
-           Depotwerts unter der ersten Karte.
-           Achtung: open.er-api.com liefert Kurse mit Basis USD, also
-           gilt rates[CHF] = wieviel CHF kostet 1 USD. Um einen CHF-Betrag
-           in USD umzurechnen, teilen wir durch rates[CHF].
+       3c) FX-ANZEIGE (Feature 3): USD/CHF-Live-Umrechnung
+           Liest /api/fx (server.py holt die Kurse selbst) und zeigt das
+           USD-Aequivalent des aktuellen CHF-Depotwerts unter der ersten
+           Karte. open.er-api.com nutzt USD als Basis; rates.CHF ist also
+           "wieviel CHF kostet 1 USD". Umrechnung: usd = chf / rates.CHF.
        --------------------------------------------------------------------- */
     const cardFx     = document.getElementById("card-fx-current");
     const fxUsdSpan  = document.getElementById("fx-usd");
-    const fxEurSpan  = document.getElementById("fx-eur");
 
-    function chfTo(currency, fxData, chfValue) {
-        // open.er-api.com nutzt USD als Basis. rates[CHF] gibt also den
-        // CHF-Wert von 1 USD an. Umrechnung CHF -> X:
-        //   1) chfValue / rates.CHF  = Wert in USD
-        //   2) USD * rates[X]        = Wert in Zielwaehrung
-        // Spezialfall: rates enthaelt USD nicht (Basis = 1 wird oft
-        // ausgelassen), dann gilt USD = chf / rates.CHF direkt.
+    function chfToUsd(fxData, chfValue) {
         const rates = (fxData && fxData.rates) || {};
         const chfPerUsd = rates.CHF;
-        if (!chfPerUsd) return null;
-        const usd = chfValue / chfPerUsd;
-        if (currency === "USD") return usd;
-        const ratePerUsd = rates[currency];
-        if (!ratePerUsd) return null;
-        return usd * ratePerUsd;
+        if (!chfPerUsd || chfPerUsd <= 0) return null;
+        return chfValue / chfPerUsd;
     }
 
     async function refreshFx() {
@@ -241,24 +275,15 @@
             // Aktueller CHF-Wert aus dem data-target der Hauptkarte.
             const currentEl = document.querySelector(".card-accent [data-counter]");
             const chf = currentEl ? parseFloat(currentEl.dataset.target) : NaN;
-            if (!Number.isFinite(chf)) return;
+            if (!Number.isFinite(chf)) { cardFx.hidden = true; return; }
 
-            const usd = chfTo("USD", data, chf);   // USD/USD = 1, also chf/chfPerUsd
-            const eur = chfTo("EUR", data, chf);
-            // Spezialfall USD: chfTo gibt fuer "USD" via rates[USD]=1 zurueck,
-            // sodass das Ergebnis = chf / rates.CHF entspricht.
+            const usd = chfToUsd(data, chf);
+            if (usd === null) { cardFx.hidden = true; return; }
 
-            if (usd !== null && eur !== null) {
-                fxUsdSpan.textContent = usd.toLocaleString("de-CH", {
-                    minimumFractionDigits: 2, maximumFractionDigits: 2,
-                });
-                fxEurSpan.textContent = eur.toLocaleString("de-CH", {
-                    minimumFractionDigits: 2, maximumFractionDigits: 2,
-                });
-                cardFx.hidden = false;
-            } else {
-                cardFx.hidden = true;
-            }
+            fxUsdSpan.textContent = usd.toLocaleString("de-CH", {
+                minimumFractionDigits: 2, maximumFractionDigits: 2,
+            });
+            cardFx.hidden = false;
         } catch (err) {
             // Stille Toleranz - FX ist eine Zusatzanzeige, kein Pflichtfeature.
         }
@@ -424,11 +449,14 @@
         maybeOpenModal();
         refreshMode();
         refreshFx();
-        // Modus + FX periodisch nachladen, ohne den Server zu fluten:
-        // Modus alle 5s (wechselt selten, aber Reaktion soll fix sein),
-        // FX alle 5min (wirklich nur ein hoeflicher Heartbeat).
-        setInterval(refreshMode, 5_000);
-        setInterval(refreshFx,   300_000);
+        refreshPaper();
+        // Modus + FX + Paper periodisch nachladen, ohne den Server zu
+        // fluten: Modus alle 5s (Reaktion soll fix sein), FX alle 5min
+        // (open.er-api hat keine harten Limits, wir bleiben aber fair),
+        // Paper alle 30s (Saldo aendert sich nur bei depotguard-Lauf).
+        setInterval(refreshMode,  5_000);
+        setInterval(refreshFx,    300_000);
+        setInterval(refreshPaper, 30_000);
     });
 
     // Zeitraum-Chips umschalten (7T / 30T / 90T).

@@ -47,8 +47,18 @@ DEPOTGUARD_PATH = os.path.join(SCRIPT_DIR, "depotguard.sh")
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
 CREDENTIALS_GPG_PATH = os.path.join(SCRIPT_DIR, "credentials.json.gpg")  # Feature 2
 RECIPIENT_PATH = os.path.join(SCRIPT_DIR, "recipient.json")   # Empfaenger-Mail (Single Source of Truth)
-MODE_PATH = os.path.join(SCRIPT_DIR, "mode.json")             # Live/Demo (Feature 1)
+MODE_PATH = os.path.join(SCRIPT_DIR, "mode.json")             # live/simulation/read-only (Feature 1)
 FX_PATH = os.path.join(SCRIPT_DIR, "fx_cache.json")           # FX-Rates (Feature 3)
+PAPER_PATH = os.path.join(SCRIPT_DIR, "paper_depot.json")     # Paper-Trading (Feature 1)
+
+# Erlaubte Modi - jede andere Eingabe wird zu read-only normalisiert.
+VALID_MODES = ("live", "simulation", "read-only")
+
+# FX (Feature 3): server.py uebernimmt den eigentlichen Abruf, depotguard.sh
+# nutzt denselben Cache nur defensiv. open.er-api.com benoetigt keinen Key.
+FX_API_URL = "https://open.er-api.com/v6/latest/USD"
+FX_CACHE_MAX_AGE_S = 12 * 3600     # 12 Stunden - FX bewegt sich kaum
+FX_FETCH_TIMEOUT_S = 8
 
 # Local-First / API-Kontingent:
 # Tagesaktuelle Snapshots schreibt depotguard.sh nach SCRIPT_DIR/depot_YYYY-MM-DD.json.
@@ -262,6 +272,111 @@ def write_recipient(email):
         raise
 
 
+def read_mode_state():
+    """Liest mode.json und normalisiert den Wert auf einen der drei
+    erlaubten Modi. Default ist read-only - der sicherste Stand fuer das
+    Frontend (deaktiviert alle Schreib-Aktionen)."""
+    state = {"mode": "read-only", "set_at": ""}
+    if os.path.isfile(MODE_PATH):
+        try:
+            with open(MODE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                mode = (data.get("mode") or "").strip().lower()
+                if mode in VALID_MODES:
+                    state["mode"] = mode
+                state["set_at"] = str(data.get("set_at") or "")
+        except (OSError, json.JSONDecodeError):
+            pass
+    return state
+
+
+def _read_fx_cache_file():
+    """Liest fx_cache.json zurueck. Liefert None, wenn die Datei fehlt
+    oder ungueltig ist."""
+    if not os.path.isfile(FX_PATH):
+        return None
+    try:
+        with open(FX_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _fx_cache_is_fresh():
+    if not os.path.isfile(FX_PATH):
+        return False
+    try:
+        age = time.time() - os.path.getmtime(FX_PATH)
+    except OSError:
+        return False
+    return age < FX_CACHE_MAX_AGE_S
+
+
+def _write_fx_cache(rates_in, time_label):
+    """Schreibt den FX-Cache atomar."""
+    out = {
+        "base": "USD",
+        "fetched_at": time_label,
+        "rates": {k: float(v) for k, v in rates_in.items()
+                  if isinstance(v, (int, float))},
+    }
+    fd, tmp = tempfile.mkstemp(prefix="fx.", suffix=".tmp", dir=SCRIPT_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, FX_PATH)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+    return out
+
+
+def ensure_fx_cache_fresh():
+    """Stellt sicher, dass fx_cache.json juenger als FX_CACHE_MAX_AGE_S ist.
+    Ist der Cache veraltet oder leer, wird ein Online-Abruf bei
+    open.er-api.com gemacht (USD-Basis, keine API-Key noetig). Bei einem
+    Fehler (offline, API down) wird einfach der vorhandene Cache zurueck-
+    gegeben und stale=True markiert. So rendert das Frontend immer Daten,
+    statt rot zu blinken."""
+    if _fx_cache_is_fresh():
+        cached = _read_fx_cache_file() or {}
+        cached["stale"] = False
+        return cached
+
+    # Stale (oder kein) Cache: Abruf versuchen.
+    try:
+        import urllib.request
+        req = urllib.request.Request(FX_API_URL, headers={"User-Agent": "DepotTracker/1.0"})
+        with urllib.request.urlopen(req, timeout=FX_FETCH_TIMEOUT_S) as resp:
+            raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+    except Exception as exc:
+        sys.stderr.write("[WARN] FX-API nicht erreichbar: %s\n" % exc)
+        cached = _read_fx_cache_file() or {"base": "USD", "fetched_at": "", "rates": {}}
+        cached["stale"] = True
+        return cached
+
+    rates_in = data.get("rates") or data.get("conversion_rates") or {}
+    time_label = (data.get("time_last_update_utc")
+                  or data.get("time_last_update")
+                  or "")
+    try:
+        out = _write_fx_cache(rates_in, time_label)
+    except Exception as exc:
+        sys.stderr.write("[WARN] FX-Cache schreiben fehlgeschlagen: %s\n" % exc)
+        cached = _read_fx_cache_file() or {"base": "USD", "fetched_at": "", "rates": {}}
+        cached["stale"] = True
+        return cached
+    out["stale"] = False
+    return out
+
+
 def read_quota_state():
     """Liest counter.json. Setzt count automatisch auf 0, wenn das Datum
     nicht heute ist (Tageswechsel-Reset)."""
@@ -289,6 +404,28 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
 
     # ---------- POST-Routing -------------------------------------------------
     def do_POST(self):
+        # Read-Only-Sperre (Feature 1): jeder schreibende Endpoint wird
+        # geblockt, sobald mode.json den Wert "read-only" hat. Das
+        # Frontend deaktiviert die Buttons zwar selbst, aber hier kommt
+        # die zweite Verteidigungslinie - falls jemand das UI umgeht.
+        current_mode = read_mode_state().get("mode", "read-only")
+        if self.path in ("/save_email", "/save_smtp", "/send_test_email"):
+            if current_mode == "read-only":
+                self._respond_json(
+                    423, False,
+                    "READ-ONLY-Modus aktiv - Schreib-Operationen sind gesperrt.",
+                )
+                return
+            # Im SIMULATION-Modus erlauben wir das Speichern der Empfaenger-
+            # Adresse, sperren aber den echten Mailversand, damit die
+            # Lehrer-Demo nie zufaellig eine echte Test-Mail rausschickt.
+            if current_mode == "simulation" and self.path == "/send_test_email":
+                self._respond_json(
+                    409, False,
+                    "SIMULATIONS-Modus aktiv - kein Mailversand. In LIVE-Modus wechseln.",
+                )
+                return
+
         if self.path == "/save_email":
             self._handle_save_email()
         elif self.path == "/save_smtp":
@@ -316,6 +453,9 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/fx":
             self._handle_get_fx()
+            return
+        if self.path == "/api/paper":
+            self._handle_get_paper()
             return
         super().do_GET()
 
@@ -375,26 +515,15 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
     # ---------- /api/mode ---------------------------------------------------
     def _handle_get_mode(self):
         """Liefert den aktuellen Lauf-Modus (Feature 1) als JSON.
-        Format: {"mode": "live"|"demo", "set_at": "..."}.
+        Format: {"mode": "live"|"simulation"|"read-only", "set_at": "..."}.
 
-        Ist mode.json nicht vorhanden, gilt LIVE als Default - das Frontend
-        zeigt dann das LIVE-Badge an. Zusaetzlich melden wir, ob fuer
-        credentials.json.gpg eine GPG-Datei existiert (Feature 2),
-        damit das Dashboard signalisiert, dass die Credentials sicher
-        verschluesselt liegen."""
-        payload_obj = {"mode": "live", "set_at": ""}
-        if os.path.isfile(MODE_PATH):
-            try:
-                with open(MODE_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    mode = (data.get("mode") or "live").strip().lower()
-                    if mode not in ("live", "demo"):
-                        mode = "live"
-                    payload_obj["mode"] = mode
-                    payload_obj["set_at"] = str(data.get("set_at") or "")
-            except (OSError, json.JSONDecodeError):
-                pass
+        Ist mode.json nicht vorhanden oder enthaelt sie einen unbekannten
+        Wert, antworten wir mit "read-only" - das ist der sicherste Default
+        fuer das Frontend (deaktiviert alle Schreib-Buttons). Zusaetzlich
+        melden wir, ob fuer credentials.json.gpg eine GPG-Datei existiert
+        (Feature 2), damit das Dashboard signalisiert, dass die Credentials
+        sicher verschluesselt liegen."""
+        payload_obj = read_mode_state()
         # Sichtbares Sicherheits-Indiz fuer das Dashboard.
         payload_obj["credentials_encrypted"] = os.path.isfile(CREDENTIALS_GPG_PATH)
         payload = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
@@ -407,26 +536,61 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
 
     # ---------- /api/fx -----------------------------------------------------
     def _handle_get_fx(self):
-        """Liefert den aktuellen FX-Cache (Feature 3) read-only ans Frontend.
-        Format: {"base": "USD", "fetched_at": "...", "rates": {...}}.
+        """Liefert die aktuellen Wechselkurse (Feature 3). Im Gegensatz
+        zur ersten Iteration ist es jetzt server.py selbst, der den
+        Online-Abruf bei open.er-api.com macht - sobald der Cache aelter
+        als FX_CACHE_MAX_AGE_S ist, wird ein neuer Abruf gestartet. Der
+        Klient bekommt entweder den frisch gezogenen oder den vorhandenen
+        Cache zurueck. Im Fehlerfall (offline, API down) liefert der
+        Endpoint einen leeren Rates-Block, damit das Frontend nichts
+        zerlegt."""
+        data = ensure_fx_cache_fresh()
+        out = {
+            "base": str(data.get("base", "USD")) if isinstance(data, dict) else "USD",
+            "fetched_at": str(data.get("fetched_at", "")) if isinstance(data, dict) else "",
+            "rates": {},
+            "stale": bool(data.get("stale", False)) if isinstance(data, dict) else True,
+        }
+        if isinstance(data, dict):
+            rates = data.get("rates") or {}
+            if isinstance(rates, dict):
+                out["rates"] = {
+                    str(k): float(v) for k, v in rates.items()
+                    if isinstance(v, (int, float))
+                }
+        payload = json.dumps(out, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
-        Existiert fx_cache.json (noch) nicht, antworten wir 200 mit leeren
-        Rates - das Dashboard zeigt dann einfach keine USD-Aequivalente,
-        statt eine Fehlermeldung zu produzieren."""
-        out = {"base": "USD", "fetched_at": "", "rates": {}}
-        if os.path.isfile(FX_PATH):
+    # ---------- /api/paper --------------------------------------------------
+    def _handle_get_paper(self):
+        """Liefert den Stand des Paper-Trading-Depots (Feature 1). Existiert
+        paper_depot.json nicht, antworten wir mit leerem Objekt - das ist
+        kein Fehler, sondern bedeutet, dass der User noch nie im
+        SIMULATION-Modus gestartet hat."""
+        out = {
+            "starting_balance_chf": 0,
+            "balance_chf": 0,
+            "history": [],
+            "exists": False,
+        }
+        if os.path.isfile(PAPER_PATH):
             try:
-                with open(FX_PATH, "r", encoding="utf-8") as f:
+                with open(PAPER_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
-                    out["base"] = str(data.get("base", "USD"))
-                    out["fetched_at"] = str(data.get("fetched_at", ""))
-                    rates = data.get("rates") or {}
-                    if isinstance(rates, dict):
-                        out["rates"] = {
-                            str(k): float(v) for k, v in rates.items()
-                            if isinstance(v, (int, float))
-                        }
+                    out["starting_balance_chf"] = float(data.get("starting_balance_chf", 0) or 0)
+                    out["balance_chf"] = float(data.get("balance_chf", 0) or 0)
+                    hist = data.get("history") or []
+                    if isinstance(hist, list):
+                        # Nur die letzten 60 Punkte ausliefern - reicht fuer
+                        # einen aussagekraeftigen Verlauf, hilt das Frontend schlank.
+                        out["history"] = hist[-60:]
+                    out["exists"] = True
             except (OSError, json.JSONDecodeError, ValueError):
                 pass
         payload = json.dumps(out, ensure_ascii=False).encode("utf-8")

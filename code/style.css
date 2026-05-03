@@ -175,20 +175,61 @@ ul { list-style: none; padding: 0; margin: 0; }
     border-radius: 50%;
     display: inline-block;
 }
-.mode-badge.mode-live { color: var(--success); border-color: rgba(46,204,113,0.45); }
-.mode-badge.mode-live .mode-dot {
-    background: var(--success);
-    box-shadow: 0 0 8px var(--success);
+.mode-badge.mode-live {
+    color: var(--danger);
+    border-color: rgba(255,85,102,0.55);
+    background: rgba(255,85,102,0.10);
 }
-.mode-badge.mode-demo {
+.mode-badge.mode-live .mode-dot {
+    background: var(--danger);
+    box-shadow: 0 0 10px var(--danger);
+    animation: pulse 1.6s infinite;
+}
+.mode-badge.mode-simulation {
     color: var(--warning);
     border-color: rgba(245,166,35,0.55);
     background: rgba(245,166,35,0.10);
 }
-.mode-badge.mode-demo .mode-dot {
+.mode-badge.mode-simulation .mode-dot {
     background: var(--warning);
-    box-shadow: 0 0 10px var(--warning);
-    animation: pulse 1.4s infinite;
+    box-shadow: 0 0 8px var(--warning);
+}
+.mode-badge.mode-readonly {
+    color: var(--text-muted);
+    border-color: var(--border-mid);
+    background: var(--bg-elevated);
+}
+.mode-badge.mode-readonly .mode-dot {
+    background: var(--text-muted);
+}
+
+/* Read-Only-Sperre: deaktivierte Schreib-Buttons werden weichgezeichnet
+   und mit "not-allowed" markiert. JS setzt zusaetzlich [disabled]. */
+body.is-readonly .btn-secondary,
+body.is-readonly .btn-demo,
+body.is-readonly .footer-link {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* Paper-Trading-Karte (Feature 1, Simulationsmodus) */
+.card-paper {
+    border-color: rgba(245,166,35,0.35);
+    background: linear-gradient(135deg, rgba(245,166,35,0.08), rgba(245,166,35,0.02));
+}
+.card-paper::after {
+    content: "SIM";
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    background: var(--warning);
+    color: #0b0f1a;
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 1.4px;
+    padding: 2px 8px;
+    border-radius: 999px;
 }
 
 /* Verschluesselungs-Indikator (Feature 2) */

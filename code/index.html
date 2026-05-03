@@ -78,10 +78,12 @@
 
         <nav class="header-meta">
             <!-- Modus-Badge (Feature 1): wird per JS aus /api/mode gefuellt
-                 und zeigt LIVE oder DEMO an. -->
-            <div class="mode-badge mode-live" id="mode-badge" title="Aktueller Lauf-Modus">
+                 und zeigt LIVE / SIMULATION / READ-ONLY an. Im Read-Only-
+                 Modus deaktiviert das Frontend zusaetzlich alle Schreib-
+                 Buttons (Empfaenger aendern, Demo-Mail, Scan ausloesen). -->
+            <div class="mode-badge mode-readonly" id="mode-badge" title="Aktueller Lauf-Modus">
                 <span class="mode-dot"></span>
-                <span class="mode-label" id="mode-label">LIVE</span>
+                <span class="mode-label" id="mode-label">READ-ONLY</span>
             </div>
             <!-- Verschluesselungs-Badge (Feature 2): erscheint, wenn das
                  Backend credentials.json.gpg verwendet. -->
@@ -107,12 +109,20 @@
             <article class="card card-accent">
                 <span class="card-label">Aktueller Depotwert</span>
                 <span class="card-value" data-counter data-target="14820.50" data-suffix=" CHF">0 CHF</span>
-                <!-- Multi-Currency (Feature 3): USD-/EUR-Aequivalent aus /api/fx -->
+                <!-- Multi-Currency (Feature 3): USD-Aequivalent aus /api/fx,
+                     wird live aus den USD/CHF-Kursen umgerechnet. -->
                 <span class="card-fx" id="card-fx-current" hidden>
-                    <span id="fx-usd">--</span> USD &middot;
-                    <span id="fx-eur">--</span> EUR
+                    &#8776; <span id="fx-usd">--</span> USD
                 </span>
                 <span class="card-trend trend-up" id="trend-current">&#9650; +1.42 %</span>
+            </article>
+
+            <!-- Paper-Trading-Karte (Feature 1, Simulationsmodus). Wird
+                 nur eingeblendet, wenn /api/paper exists=true zurueckgibt. -->
+            <article class="card card-paper" id="paper-card" hidden>
+                <span class="card-label">Paper-Saldo (Simulation)</span>
+                <span class="card-value" id="paper-balance">0.00 CHF</span>
+                <span class="card-sub" id="paper-sub">Start: 100.00 CHF</span>
             </article>
 
             <article class="card">
