@@ -1654,7 +1654,7 @@ start_server_background() {
     log INFO "Starte Dashboard im Hintergrund (Modus: $DEPOT_MODE) -> $server_log"
     # nohup koppelt den Prozess vom Terminal ab, damit das Dashboard
     # weiterlaeuft, auch wenn das Skript endet.
-    DEPOT_MODE="$DEPOT_MODE" nohup "$VENV_PYTHON" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
+    DEPOT_SMTP_USER="$SMTP_USER" DEPOT_SMTP_PASS="$SMTP_PASS" DEPOT_MODE="$DEPOT_MODE" nohup "$VENV_PYTHON" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
     echo $! > "$pid_file"
     # Wartezeit erhoehen (WSL braucht teils 6-8 Sekunden fuer den ersten
     # Socket). 10 Versuche mit 1s Pause = max. 10 Sekunden.

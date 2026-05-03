@@ -1018,13 +1018,13 @@ def _decrypt_gpg_credentials():
         pass
 
     # Passphrase-Quellen: env DEPOT_GPG_PASS oder .gpg_passphrase-Datei.
-    pass_args = []
+    pass_args = ["--batch", "--yes"]
     pass_file = os.path.join(SCRIPT_DIR, ".gpg_passphrase")
     env_pass = os.environ.get("DEPOT_GPG_PASS")
     if env_pass:
-        pass_args = ["--batch", "--yes", "--passphrase", env_pass, "--pinentry-mode", "loopback"]
+        pass_args.extend(["--passphrase", env_pass, "--pinentry-mode", "loopback"])
     elif os.path.isfile(pass_file):
-        pass_args = ["--batch", "--yes", "--passphrase-file", pass_file, "--pinentry-mode", "loopback"]
+        pass_args.extend(["--passphrase-file", pass_file, "--pinentry-mode", "loopback"])
 
     try:
         result = subprocess.run(
@@ -1063,12 +1063,22 @@ def _decrypt_gpg_credentials():
 
 
 def load_credentials():
-    """Vorzugspfad (Feature 2): credentials.json.gpg per GPG nach /dev/shm
-    entschluesseln, sofort lesen und temporaere Datei wieder loeschen.
-    Faellt auf die Klartext-credentials.json zurueck, falls keine GPG-Datei
-    vorhanden ist (Legacy-Pfad fuer Entwicklungsrechner)."""
+    """Vorzugspfad (Feature 2): Zuerst aus Environment-Variablen laden
+    (gesetzt durch depotguard.sh). Falls nicht vorhanden, versuche
+    credentials.json.gpg per GPG nach /dev/shm zu entschluesseln
+    oder falle auf die Klartext-credentials.json zurueck."""
     global SMTP_USER, SMTP_PASS
 
+    # Weg 1: Uebergeben von depotguard.sh (am sichersten, da RAM-only
+    # und keine Passphrase im Hintergrund noetig)
+    env_user = os.environ.get("DEPOT_SMTP_USER")
+    env_pass = os.environ.get("DEPOT_SMTP_PASS")
+    if env_user is not None and env_pass is not None:
+        SMTP_USER = env_user
+        SMTP_PASS = env_pass
+        return
+
+    # Weg 2: GPG / Klartext-Fallback
     data = None
     if os.path.isfile(CREDENTIALS_GPG_PATH):
         data = _decrypt_gpg_credentials()
