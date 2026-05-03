@@ -11,3 +11,8 @@ recipient.json
 server.pid
 depot_*.json
 counter.json
+mode.json
+fx_cache.json
+.gpg_passphrase
+backup.pass
+depottracker_backups/

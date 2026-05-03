@@ -59,7 +59,10 @@ fail() { printf "%b[FEHLER]%b  %s\n" "$C_RED"   "$C_RESET" "$*" >&2; exit 1; }
 # bzw. cffi (von cairosvg/svglib) sauber kompiliert. python3-venv stellt
 # unter Ubuntu/Debian das "venv"-Modul bereit (auf manchen Minimal-Images
 # ist es nicht in python3 enthalten).
-APT_PACKAGES=(libcairo2-dev pkg-config python3-dev python3-venv)
+# gnupg + tar + curl + jq werden zusaetzlich von Feature 2 (GPG-Credentials),
+# Feature 4 (verschluesseltes Backup), Feature 3 (FX-API-Abruf) und der Pre-
+# Flight-Pruefung in depotguard.sh benoetigt.
+APT_PACKAGES=(libcairo2-dev pkg-config python3-dev python3-venv gnupg tar curl jq)
 
 log "Installiere System-Pakete: ${APT_PACKAGES[*]}"
 if ! command -v apt-get >/dev/null 2>&1; then
@@ -128,6 +131,11 @@ echo
 printf "Naechste Schritte:\n"
 printf "  1. Trage deine Gmail-Daten in code/credentials.json ein\n"
 printf "     (Vorlage: code/credentials.example.json, Anleitung in README.md).\n"
-printf "  2. Starte den Tracker:    cd code && ./depotguard.sh\n"
-printf "  3. Dashboard im Browser:  http://localhost:8000\n"
+printf "  2. (Optional, empfohlen) Verschluessle die Datei einmalig mit GPG:\n"
+printf "        cd code && ./depotguard.sh --encrypt-credentials\n"
+printf "     Danach existiert nur noch credentials.json.gpg, der Klartext\n"
+printf "     wird bei jedem Lauf nur in /dev/shm entschluesselt.\n"
+printf "  3. Starte den Tracker:    cd code && ./depotguard.sh\n"
+printf "  4. Dashboard im Browser:  http://localhost:8000\n"
+printf "  5. Backups einrichten:    ./backup.sh --install-cron\n"
 echo

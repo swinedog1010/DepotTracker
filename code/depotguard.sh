@@ -31,7 +31,12 @@ set -euo pipefail
 # Alle temporaeren Dateien werden in TMP_FILES gesammelt und ausschliesslich
 # ueber die cleanup-Funktion entfernt. So gibt es im restlichen Skript KEIN
 # manuelles "rm -f", was die Fehlerquote reduziert.
+#
+# RAMDISK_CRED zeigt - falls credentials.json.gpg verwendet wird - auf die
+# in /dev/shm/ entschluesselte Credential-Datei. cleanup() loescht sie
+# IMMER, auch bei hartem Crash oder Signalabbruch (Feature 2).
 TMP_FILES=""
+RAMDISK_CRED=""
 
 cleanup() {
     # Wird durch "trap ... EXIT" beim Verlassen des Skripts immer aufgerufen,
@@ -40,8 +45,34 @@ cleanup() {
     for f in $TMP_FILES; do
         [[ -e "$f" ]] && rm -f "$f"
     done
+
+    # --- RAM-Disk: entschluesselte Credentials sofort und restlos loeschen ---
+    # Wir nutzen "shred" wenn verfuegbar (mehrfaches Ueberschreiben), sonst
+    # ein einfaches rm -f als Fallback. Die Datei darf unter KEINEN
+    # Umstaenden auf der Disk zurueckbleiben.
+    if [[ -n "$RAMDISK_CRED" && -f "$RAMDISK_CRED" ]]; then
+        if command -v shred >/dev/null 2>&1; then
+            shred -uz "$RAMDISK_CRED" 2>/dev/null || rm -f "$RAMDISK_CRED"
+        else
+            rm -f "$RAMDISK_CRED"
+        fi
+    fi
+
+    # Sicherheitsnetz: alle DepotTracker-Reste in /dev/shm dieses Prozesses
+    # wegraeumen, falls sich aus irgendeinem Grund Dateien angesammelt haben
+    # (z.B. nach einem fruehen Abbruch noch vor dem Setzen von RAMDISK_CRED).
+    if [[ -d /dev/shm && -w /dev/shm ]]; then
+        rm -f /dev/shm/depottracker."$$".* 2>/dev/null || true
+    fi
 }
+
+# Kombi-Trap: cleanup laeuft bei normalem Exit UND bei Signalen. Die
+# Exit-Codes folgen der Konvention 128 + Signal-Nummer, damit Cron-Logs
+# den Abbruchsgrund sauber dokumentieren.
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
 
 # -----------------------------------------------------------------------------
 # 3) KONFIGURATION (oben im Skript, KEINE separate config.sh)
@@ -60,7 +91,30 @@ CACHE_FILE="${SCRIPT_DIR}/price_cache.json"
 ATH_FILE="${SCRIPT_DIR}/ath.txt"
 HISTORY_FILE="${SCRIPT_DIR}/history.csv"
 CREDENTIALS_FILE="${SCRIPT_DIR}/credentials.json"
+CREDENTIALS_GPG="${SCRIPT_DIR}/credentials.json.gpg"   # GPG-verschluesselte Variante (Feature 2)
 RECIPIENT_FILE="${SCRIPT_DIR}/recipient.json"   # Empfaenger-Mail aus Terminal-Setup
+MODE_FILE="${SCRIPT_DIR}/mode.json"             # LIVE/DEMO-Modus (Feature 1)
+FX_FILE="${SCRIPT_DIR}/fx_cache.json"           # FX-Wechselkurse (Feature 3)
+
+# --- RAM-Disk fuer entschluesselte Credentials (Feature 2) ------------------
+# Auf Linux-Systemen gibt es /dev/shm als tmpfs-Mount im RAM. Auf Systemen
+# ohne /dev/shm (z.B. Git-Bash unter Windows) wird ein normales TMPDIR
+# benutzt - mit klar protokolliertem Hinweis, dass dort kein RAM-Schutz
+# gegen Disk-Forensik besteht. In beiden Faellen sorgt die cleanup-Trap
+# fuer das sofortige Loeschen der Datei beim Skript-Ende.
+if [[ -d /dev/shm && -w /dev/shm ]]; then
+    RAMDISK_BASE="/dev/shm"
+    RAMDISK_AVAILABLE=1
+else
+    RAMDISK_BASE="${TMPDIR:-/tmp}"
+    RAMDISK_AVAILABLE=0
+fi
+
+# Optionale GPG-Passphrase: ueber Umgebungsvariable DEPOT_GPG_PASS, oder
+# (zweite Wahl) aus einer .gpg_passphrase-Datei mit chmod 600. Beides
+# liegt OUTSIDE der GPG-Datei, damit das Repo selbst keine Klartext-
+# Passphrase enthaelt. Fehlt beides, fragt gpg interaktiv im Terminal.
+GPG_PASSPHRASE_FILE="${SCRIPT_DIR}/.gpg_passphrase"
 
 # --- Schwellenwerte und Zeitlimits ------------------------------------------
 CACHE_MAX_AGE=3600        # max. Cache-Alter in Sekunden (60 Minuten)
@@ -94,6 +148,23 @@ declare -A DEPOT=(
 # --- API & Waehrung ---------------------------------------------------------
 API_BASE="https://api.coingecko.com/api/v3/simple/price"
 FIAT_CURRENCY="chf"
+
+# --- Multi-Currency / FX-API (Feature 3) ------------------------------------
+# open.er-api.com liefert kostenlose, key-freie FX-Daten. Wir laden die
+# Kurse einmal pro Lauf (mit Tagescache via FX_FILE) und schreiben sie als
+# Begleit-Datei zum Snapshot, damit das Dashboard internationale Aequivalente
+# (USD, EUR, GBP) anzeigen kann, ohne selbst eine API zu kontaktieren.
+FX_API_BASE="https://open.er-api.com/v6/latest"
+FX_BASE_CURRENCY="USD"
+FX_QUOTE_CURRENCIES="CHF EUR GBP JPY"
+FX_CACHE_MAX_AGE=43200    # 12 Stunden - FX bewegt sich kaum, schont das Limit.
+
+# --- Modus (Feature 1) ------------------------------------------------------
+# DEPOT_MODE wird in prompt_for_mode() auf "live" oder "demo" gesetzt.
+# Demo simuliert einen massiven Kurssturz und versendet sofort eine Alarm-
+# Mail - ohne API-Abruf, ohne Schwellen-Berechnung. Live ist der normale
+# Pfad mit echten Kursen.
+DEPOT_MODE="live"
 
 # --- E-Mail-Konfiguration ---------------------------------------------------
 # EMAIL_RECIPIENT wird zur Laufzeit aus recipient.json geladen (Terminal-Setup
@@ -171,6 +242,141 @@ log() {
     printf "%b[%s] [%s] %s%b\n" "$color" "$ts" "$level" "$msg" "$C_RESET"
     if [[ -d "$LOG_DIR" ]]; then
         printf "[%s] [%s] %s\n" "$ts" "$level" "$msg" >> "$LOG_FILE"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# 4b) PRE-FLIGHT DEPENDENCY-CHECK (Feature 5)
+# -----------------------------------------------------------------------------
+# Stellt sicher, dass alle benoetigten System-Tools (curl, tar, gpg, jq, awk,
+# python3) vor dem Start verfuegbar sind. Fehlt etwas, wird im Terminal
+# eine [Y/n]-Abfrage gestellt und - bei Bestaetigung - via apt-get auto-
+# matisch nachinstalliert. Auf Nicht-Debian-Systemen gibt es lediglich eine
+# klare Hinweis-Meldung, damit der User manuell handeln kann.
+preflight_check() {
+    local req_sys=(curl tar gpg jq awk python3)
+    local missing=()
+    local cmd
+    for cmd in "${req_sys[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+
+    if (( ${#missing[@]} == 0 )); then
+        log INFO "Pre-Flight: alle System-Pakete vorhanden (${req_sys[*]})."
+        return 0
+    fi
+
+    printf "\n%bPre-Flight: fehlende System-Pakete -> %s%b\n" \
+           "$C_YELLOW" "${missing[*]}" "$C_RESET"
+
+    # Auf Systemen ohne apt-get (macOS, RHEL ohne dnf etc.) koennen wir
+    # nicht selbst installieren - klar dokumentieren und fortfahren.
+    if ! command -v apt-get >/dev/null 2>&1; then
+        printf "%b  apt-get nicht verfuegbar - bitte manuell installieren:%b\n" \
+               "$C_YELLOW" "$C_RESET"
+        printf "    %s\n\n" "${missing[*]}"
+        return 1
+    fi
+
+    # Interaktive [Y/n]-Abfrage. Default auf Y, wenn Enter gedrueckt wird.
+    # Falls keine TTY verfuegbar ist (Cron), brechen wir mit klarem Log ab.
+    if [[ ! -t 0 && ! -e /dev/tty ]]; then
+        log WARN "Keine TTY - automatische Installation nicht moeglich. Bitte interaktiv starten."
+        return 1
+    fi
+
+    local ans=""
+    printf "Sollen die fehlenden Pakete jetzt via apt-get installiert werden? [Y/n] "
+    IFS= read -r ans </dev/tty || ans="n"
+    ans="${ans:-Y}"
+    if [[ ! "$ans" =~ ^[YyJj]$ ]]; then
+        log WARN "Pre-Flight: Installation abgelehnt - das Skript kann scheitern."
+        return 1
+    fi
+
+    # Command -> apt-Paketname mappen, wo sich die Namen unterscheiden.
+    local pkgs=()
+    for cmd in "${missing[@]}"; do
+        case "$cmd" in
+            gpg)     pkgs+=("gnupg") ;;
+            python3) pkgs+=("python3" "python3-venv") ;;
+            *)       pkgs+=("$cmd") ;;
+        esac
+    done
+
+    local sudo_cmd=""
+    if [[ $EUID -ne 0 ]]; then
+        if ! command -v sudo >/dev/null 2>&1; then
+            log ERROR "Weder root noch sudo - apt-get kann nicht ausgefuehrt werden."
+            return 1
+        fi
+        sudo_cmd="sudo"
+    fi
+
+    log INFO "apt-get update + install ${pkgs[*]} (kann ein paar Sekunden dauern) ..."
+    DEBIAN_FRONTEND=noninteractive $sudo_cmd apt-get update -y >/dev/null 2>&1 || true
+    if DEBIAN_FRONTEND=noninteractive $sudo_cmd apt-get install -y "${pkgs[@]}"; then
+        log SUCCESS "Pre-Flight: Pakete installiert (${pkgs[*]})."
+    else
+        log WARN "apt-get hat einen Fehler gemeldet - bitte manuell pruefen."
+        return 1
+    fi
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# 4c) MODE-AUSWAHL (Feature 1: Live vs Demo)
+# -----------------------------------------------------------------------------
+save_mode() {
+    # Schreibt die aktuelle Modus-Wahl atomar nach mode.json. Das Frontend
+    # liest die Datei via /api/mode und zeigt das passende Badge.
+    local m="$1"
+    local tmp
+    tmp="$(mktemp)"; TMP_FILES="$TMP_FILES $tmp"
+    printf '{\n  "mode": "%s",\n  "set_at": "%s"\n}\n' "$m" "$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)" > "$tmp"
+    mv "$tmp" "$MODE_FILE"
+}
+
+prompt_for_mode() {
+    # Fragt VOR der E-Mail-Eingabe nach dem Lauf-Modus.
+    #   1 = LIVE  -> echte CoinGecko-Kurse, stilles Warten auf Schwelle
+    #   2 = DEMO  -> Force-Alarm, sofort PDF + Mail, ohne API-Abruf
+    # Default ist LIVE. Bei nicht-interaktiven Cronjob-Laeufen ueberspringen
+    # wir die Abfrage komplett und behalten LIVE bei.
+    if [[ ! -t 0 && ! -e /dev/tty ]]; then
+        DEPOT_MODE="live"
+        save_mode "$DEPOT_MODE"
+        log INFO "Keine TTY - bleibe im LIVE-Modus (Cron-Lauf)."
+        return 0
+    fi
+
+    printf "\n%b┌─ DepotTracker - Modus waehlen ───────────────────────────┐%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ [1] LIVE  - Echte CoinGecko-Kurse, Alarm bei Unterschreit.│%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ [2] DEMO  - Force-Alarm: sofort QR-Rechnung + Mail-Versand│%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b└───────────────────────────────────────────────────────────┘%b\n\n" "$C_YELLOW" "$C_RESET"
+
+    local choice="" attempt
+    for attempt in 1 2 3; do
+        printf "Auswahl [1/2] (Default: 1): "
+        if ! IFS= read -r choice </dev/tty; then
+            choice="1"
+        fi
+        choice="${choice:-1}"
+        case "$choice" in
+            1|live|LIVE|l|L) DEPOT_MODE="live"; break ;;
+            2|demo|DEMO|d|D) DEPOT_MODE="demo"; break ;;
+            *) printf "%bUngueltig - bitte 1 oder 2 eingeben.%b\n\n" "$C_RED" "$C_RESET"; choice="" ;;
+        esac
+    done
+
+    [[ -z "$choice" ]] && DEPOT_MODE="live"
+    save_mode "$DEPOT_MODE"
+
+    if [[ "$DEPOT_MODE" == "demo" ]]; then
+        printf "%b>>> DEMO-MODUS aktiv - Alarm wird simuliert. <<<%b\n\n" "$C_RED" "$C_RESET"
+        log SUCCESS "Modus: DEMO (Force-Alarm)"
+    else
+        log SUCCESS "Modus: LIVE (echte Kurse)"
     fi
 }
 
@@ -299,19 +505,115 @@ PYEOF
     return 1
 }
 
-load_credentials() {
-    # Stellt sicher, dass credentials.json existiert (silent-Fallback ueber
-    # ensure_credentials_file) und liest dann SMTP_USER + SMTP_PASS aus.
-    # Es gibt KEINE Terminal-Abfrage - das Skript darf nirgends auf eine
-    # Benutzereingabe warten.
+decrypt_credentials_to_ramdisk() {
+    # GPG-Entschluesselung von credentials.json.gpg in eine RAM-Disk-Datei.
+    # Die Pfadkonstruktion folgt dem Schema:
+    #     /dev/shm/depottracker.<PID>.cred-<NS-Timestamp>.json
+    # damit die cleanup-Trap sicher alle Dateien dieses Prozesses einsammeln
+    # kann, falls der Lauf abrupt endet.
+    [[ -f "$CREDENTIALS_GPG" ]] || return 1
+
+    if ! command -v gpg >/dev/null 2>&1; then
+        log WARN "GPG nicht installiert - kann credentials.json.gpg nicht entschluesseln."
+        return 1
+    fi
+
+    local stamp
+    stamp="$(date +%s 2>/dev/null)$$$RANDOM"
+    local target="${RAMDISK_BASE}/depottracker.$$.cred-${stamp}.json"
+
+    # Passphrase-Quellen in dieser Reihenfolge:
+    #   1) DEPOT_GPG_PASS (Umgebungsvariable, z.B. aus systemd-Unit)
+    #   2) GPG_PASSPHRASE_FILE (.gpg_passphrase mit chmod 600)
+    #   3) interaktiv ueber gpg-agent / pinentry (nur wenn TTY vorhanden)
+    local pp_args=()
+    if [[ -n "${DEPOT_GPG_PASS:-}" ]]; then
+        pp_args=(--batch --yes --passphrase "$DEPOT_GPG_PASS" --pinentry-mode loopback)
+    elif [[ -f "$GPG_PASSPHRASE_FILE" ]]; then
+        pp_args=(--batch --yes --passphrase-file "$GPG_PASSPHRASE_FILE" --pinentry-mode loopback)
+    fi
+
+    if ! gpg "${pp_args[@]}" --quiet --decrypt --output "$target" \
+            "$CREDENTIALS_GPG" 2>/dev/null; then
+        log ERROR "GPG-Entschluesselung fehlgeschlagen - credentials.json.gpg konnte nicht gelesen werden."
+        rm -f "$target" 2>/dev/null || true
+        return 1
+    fi
+
+    chmod 600 "$target" 2>/dev/null || true
+    RAMDISK_CRED="$target"
+
+    if (( RAMDISK_AVAILABLE == 1 )); then
+        log SUCCESS "Credentials nach RAM-Disk entschluesselt ($target)"
+    else
+        log WARN "Kein /dev/shm verfuegbar - Credentials liegen temporaer in $target (KEIN RAM-Schutz)"
+    fi
+    return 0
+}
+
+encrypt_credentials_to_gpg() {
+    # Verschluesselt eine Klartext-credentials.json einmalig nach
+    # credentials.json.gpg (symmetrisch, AES256). Nach erfolgreicher
+    # Verschluesselung wird die Klartext-Datei mit shred/rm geloescht.
+    # Dieses Hilfs-Tool ist fuer den Setup-Lauf gedacht und wird vom
+    # Hauptpfad NICHT automatisch aufgerufen.
     if [[ ! -f "$CREDENTIALS_FILE" ]]; then
-        if ! ensure_credentials_file; then
-            return 1
+        log ERROR "credentials.json fehlt - nichts zu verschluesseln."
+        return 1
+    fi
+    if ! command -v gpg >/dev/null 2>&1; then
+        log ERROR "GPG nicht installiert - Verschluesselung nicht moeglich."
+        return 1
+    fi
+
+    local pp_args=()
+    if [[ -n "${DEPOT_GPG_PASS:-}" ]]; then
+        pp_args=(--batch --yes --passphrase "$DEPOT_GPG_PASS" --pinentry-mode loopback)
+    elif [[ -f "$GPG_PASSPHRASE_FILE" ]]; then
+        pp_args=(--batch --yes --passphrase-file "$GPG_PASSPHRASE_FILE" --pinentry-mode loopback)
+    fi
+
+    if ! gpg "${pp_args[@]}" --symmetric --cipher-algo AES256 \
+            --output "$CREDENTIALS_GPG" "$CREDENTIALS_FILE"; then
+        log ERROR "GPG-Verschluesselung fehlgeschlagen."
+        return 1
+    fi
+    chmod 600 "$CREDENTIALS_GPG" 2>/dev/null || true
+
+    if command -v shred >/dev/null 2>&1; then
+        shred -uz "$CREDENTIALS_FILE" 2>/dev/null || rm -f "$CREDENTIALS_FILE"
+    else
+        rm -f "$CREDENTIALS_FILE"
+    fi
+    log SUCCESS "credentials.json.gpg erstellt - Klartext-Datei entfernt."
+    return 0
+}
+
+load_credentials() {
+    # Vorzugspfad (Feature 2): wenn credentials.json.gpg existiert, wird die
+    # Datei nach RAM-Disk entschluesselt und SMTP_USER/SMTP_PASS dort gelesen.
+    # Klartext-credentials.json gilt als Legacy-Fallback fuer Entwicklungs-
+    # rechner ohne GPG-Setup.
+    local source_file=""
+    if [[ -f "$CREDENTIALS_GPG" ]]; then
+        if decrypt_credentials_to_ramdisk; then
+            source_file="$RAMDISK_CRED"
+        else
+            log WARN "GPG-Pfad fehlgeschlagen - falle auf Klartext-credentials.json zurueck (sofern vorhanden)."
         fi
     fi
 
+    if [[ -z "$source_file" ]]; then
+        if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+            if ! ensure_credentials_file; then
+                return 1
+            fi
+        fi
+        source_file="$CREDENTIALS_FILE"
+    fi
+
     local out
-    if ! out="$("$VENV_PYTHON" - "$CREDENTIALS_FILE" <<'PYEOF'
+    if ! out="$("$VENV_PYTHON" - "$source_file" <<'PYEOF'
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -732,6 +1034,99 @@ load_prices() {
     fi
     log ERROR "API-Fehler UND kein lokaler Cache - kontrollierter Abbruch."
     exit 1
+}
+
+# -----------------------------------------------------------------------------
+# 10b) FX-WECHSELKURSE (Feature 3: Multi-Currency)
+# -----------------------------------------------------------------------------
+fx_cache_is_fresh() {
+    # FX bewegt sich kaum; FX_CACHE_MAX_AGE = 12h erspart das Anschlagen
+    # gegen das ohnehin schon grosszuegige Limit der API.
+    [[ -f "$FX_FILE" ]] || return 1
+    local now mtime age
+    now="$(date +%s)"
+    mtime="$(stat -c %Y "$FX_FILE" 2>/dev/null || stat -f %m "$FX_FILE" 2>/dev/null || echo 0)"
+    age=$(( now - mtime ))
+    (( age < FX_CACHE_MAX_AGE ))
+}
+
+fetch_fx_rates() {
+    # Holt USD-basierte Wechselkurse fuer FX_QUOTE_CURRENCIES und schreibt
+    # sie atomar nach fx_cache.json. Der Endpunkt benoetigt keinen API-Key
+    # und liefert ein flaches JSON {"rates":{"CHF":0.91,...}}.
+    if fx_cache_is_fresh; then
+        log INFO "FX-Cache aktuell (< ${FX_CACHE_MAX_AGE}s) - keine FX-API-Abfrage."
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp)"; TMP_FILES="$TMP_FILES $tmp"
+
+    if ! curl -sf --max-time "$API_TIMEOUT" \
+            "${FX_API_BASE}/${FX_BASE_CURRENCY}" -o "$tmp"; then
+        log WARN "FX-API nicht erreichbar - bestehender FX-Cache bleibt unveraendert."
+        return 1
+    fi
+
+    if ! FX_FILE_OUT="$FX_FILE" \
+         FX_BASE="$FX_BASE_CURRENCY" \
+         FX_QUOTES="$FX_QUOTE_CURRENCIES" \
+         "$VENV_PYTHON" - "$tmp" <<'PYEOF'
+import json, os, sys, tempfile
+src      = sys.argv[1]
+target   = os.environ["FX_FILE_OUT"]
+base     = os.environ["FX_BASE"]
+quotes   = os.environ["FX_QUOTES"].split()
+try:
+    with open(src, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception as exc:
+    sys.stderr.write("FX-API: ungueltiges JSON: %s\n" % exc)
+    sys.exit(1)
+rates_in = data.get("rates", {}) or data.get("conversion_rates", {}) or {}
+out = {
+    "base": base,
+    "fetched_at": data.get("time_last_update_utc", "") or data.get("time_last_update", ""),
+    "rates": {q: float(rates_in[q]) for q in quotes if q in rates_in},
+}
+d = os.path.dirname(target) or "."
+fd, tmpf = tempfile.mkstemp(prefix="fx.", suffix=".tmp", dir=d)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmpf, target)
+except Exception as exc:
+    if os.path.exists(tmpf):
+        try: os.unlink(tmpf)
+        except OSError: pass
+    sys.stderr.write("FX-Cache schreiben fehlgeschlagen: %s\n" % exc)
+    sys.exit(1)
+PYEOF
+    then
+        log WARN "FX-Cache konnte nicht geschrieben werden."
+        return 1
+    fi
+    log SUCCESS "FX-Rates aktualisiert: $FX_FILE"
+    return 0
+}
+
+fx_rate_for() {
+    # fx_rate_for <CODE> -> druckt den Kurs CODE/FX_BASE auf STDOUT.
+    # Existiert FX_FILE nicht oder fehlt der Code, wird "" gedruckt.
+    local code="$1"
+    [[ -f "$FX_FILE" ]] || { echo ""; return; }
+    "$VENV_PYTHON" - "$FX_FILE" "$code" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    rate = data.get("rates", {}).get(sys.argv[2], "")
+    if rate != "":
+        print(float(rate))
+except Exception:
+    pass
+PYEOF
 }
 
 # -----------------------------------------------------------------------------
@@ -1201,25 +1596,86 @@ maybe_start_dashboard() {
 # 17) HAUPT-ABLAUF
 # -----------------------------------------------------------------------------
 main() {
-    auto_setup
-    # Einziger interaktiver Schritt: Empfaenger-Mail abfragen, falls noch
-    # keine recipient.json existiert. Bewusst VOR setup_python_env, damit
-    # der User nicht erst auf die venv-Installation warten muss.
-    prompt_for_recipient
-    # Python-Umgebung (venv + Pakete) muss vor jedem Aufruf von "$VENV_PYTHON"
-    # bereitstehen, also direkt nach dem auto_setup einrichten.
-    setup_python_env
-    log INFO "=== DepotTracker Lauf gestartet ==="
+    # 0) Pre-Flight: System-Tools pruefen (Feature 5). Schlaegt nur fehl,
+    #    wenn der User die [Y/n]-Abfrage ablehnt - dann laeuft das Skript
+    #    weiter, bricht aber spaeter sauber ab, falls ein Tool fehlt.
+    preflight_check || true
 
-    # Empfaenger und SMTP-Credentials laden (beide best-effort - im Fehlerfall
-    # wird im Alarm-Pfad eine klare Meldung geloggt und der Versand uebersprungen).
+    # 1) Optionaler Helfer: depotguard.sh --encrypt-credentials einmalig
+    #    aufrufen, um eine bestehende credentials.json nach
+    #    credentials.json.gpg zu konvertieren. Das Skript endet danach
+    #    sofort - der normale Lauf ist nicht beruehrt (Feature 2).
+    #    auto_setup ist nicht noetig: wir brauchen weder Cronjob noch
+    #    Output-/History-Dateien fuer die Verschluesselung.
+    if [[ "${1:-}" == "--encrypt-credentials" ]]; then
+        encrypt_credentials_to_gpg
+        exit $?
+    fi
+
+    auto_setup
+
+    # 2) Modus-Auswahl (Feature 1). Wird VOR der E-Mail-Abfrage gestellt,
+    #    damit der Praesentations-Flow ("Modus -> Empfaenger -> Lehrer
+    #    bekommt Mail") als ein zusammenhaengender Setup-Schritt erscheint.
+    prompt_for_mode
+
+    # 3) Einziger weiterer interaktiver Schritt: Empfaenger-Mail abfragen.
+    #    Bewusst VOR setup_python_env, damit der User nicht erst auf die
+    #    venv-Installation warten muss.
+    prompt_for_recipient
+
+    # 4) Python-Umgebung (venv + Pakete) muss vor jedem Aufruf von
+    #    "$VENV_PYTHON" bereitstehen, also direkt nach den Prompts.
+    setup_python_env
+    log INFO "=== DepotTracker Lauf gestartet (Modus: $DEPOT_MODE) ==="
+
+    # 5) Empfaenger und SMTP-Credentials laden (beide best-effort - im
+    #    Fehlerfall wird im Alarm-Pfad eine klare Meldung geloggt und der
+    #    Versand uebersprungen). load_credentials zieht automatisch die
+    #    GPG-Datei vor, falls vorhanden, und legt sie nach /dev/shm.
     load_recipient || true
     load_credentials || true
 
+    # ------------------------------------------------------------------
+    # 6) DEMO-PFAD (Feature 1): simulierter Kurssturz, Alarm SOFORT.
+    #    Greift NICHT auf CoinGecko zu, schreibt aber trotzdem History
+    #    + Snapshot, damit das Dashboard sinnvolle Werte anzeigt.
+    # ------------------------------------------------------------------
+    if [[ "$DEPOT_MODE" == "demo" ]]; then
+        log WARN "DEMO-MODUS - simuliere massiven Kurssturz."
+
+        # FX-Rates trotzdem laden, damit das Dashboard im Demo-Modus
+        # USD/EUR-Aequivalente anzeigen kann (Feature 3).
+        fetch_fx_rates || true
+
+        local demo_total="500.00"
+        local demo_ath
+        demo_ath="$(awk 'BEGIN{print 14820.00}')"
+        local demo_loss demo_loss_pct
+        demo_loss="$(awk -v a="$demo_ath" -v t="$demo_total" 'BEGIN{printf "%.2f", a - t}')"
+        demo_loss_pct="$(awk -v a="$demo_ath" -v t="$demo_total" \
+                        'BEGIN{printf "%.2f", (a - t) / a * 100}')"
+
+        append_history "$demo_total" "ALARM"
+        handle_alarm "$demo_total" "$demo_ath" "$demo_loss" "$demo_loss_pct"
+
+        log INFO "=== DepotTracker DEMO-Lauf beendet ==="
+        maybe_start_dashboard
+        return 0
+    fi
+
+    # ------------------------------------------------------------------
+    # 7) LIVE-PFAD: Original-Logik unveraendert
+    # ------------------------------------------------------------------
     check_cpu_load
     sleep "$STEP_DELAY"   # System-Throttling zwischen Schritten.
     load_prices
     sleep "$STEP_DELAY"
+
+    # FX-Rates fuer das Dashboard nachladen (Feature 3). Fehlerfaelle
+    # blockieren den Hauptpfad nicht - das Dashboard zeigt dann eben
+    # keine USD/EUR-Aequivalente.
+    fetch_fx_rates || true
 
     local total ath loss loss_pct status
     total="$(calculate_total)"

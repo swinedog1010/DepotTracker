@@ -45,7 +45,10 @@ PORT = 8000
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEPOTGUARD_PATH = os.path.join(SCRIPT_DIR, "depotguard.sh")
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+CREDENTIALS_GPG_PATH = os.path.join(SCRIPT_DIR, "credentials.json.gpg")  # Feature 2
 RECIPIENT_PATH = os.path.join(SCRIPT_DIR, "recipient.json")   # Empfaenger-Mail (Single Source of Truth)
+MODE_PATH = os.path.join(SCRIPT_DIR, "mode.json")             # Live/Demo (Feature 1)
+FX_PATH = os.path.join(SCRIPT_DIR, "fx_cache.json")           # FX-Rates (Feature 3)
 
 # Local-First / API-Kontingent:
 # Tagesaktuelle Snapshots schreibt depotguard.sh nach SCRIPT_DIR/depot_YYYY-MM-DD.json.
@@ -308,6 +311,12 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/recipient":
             self._handle_get_recipient()
             return
+        if self.path == "/api/mode":
+            self._handle_get_mode()
+            return
+        if self.path == "/api/fx":
+            self._handle_get_fx()
+            return
         super().do_GET()
 
     # ---------- /api/depot --------------------------------------------------
@@ -356,6 +365,71 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
         ueberspringen."""
         email = read_recipient()
         payload = json.dumps({"email": email}, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    # ---------- /api/mode ---------------------------------------------------
+    def _handle_get_mode(self):
+        """Liefert den aktuellen Lauf-Modus (Feature 1) als JSON.
+        Format: {"mode": "live"|"demo", "set_at": "..."}.
+
+        Ist mode.json nicht vorhanden, gilt LIVE als Default - das Frontend
+        zeigt dann das LIVE-Badge an. Zusaetzlich melden wir, ob fuer
+        credentials.json.gpg eine GPG-Datei existiert (Feature 2),
+        damit das Dashboard signalisiert, dass die Credentials sicher
+        verschluesselt liegen."""
+        payload_obj = {"mode": "live", "set_at": ""}
+        if os.path.isfile(MODE_PATH):
+            try:
+                with open(MODE_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    mode = (data.get("mode") or "live").strip().lower()
+                    if mode not in ("live", "demo"):
+                        mode = "live"
+                    payload_obj["mode"] = mode
+                    payload_obj["set_at"] = str(data.get("set_at") or "")
+            except (OSError, json.JSONDecodeError):
+                pass
+        # Sichtbares Sicherheits-Indiz fuer das Dashboard.
+        payload_obj["credentials_encrypted"] = os.path.isfile(CREDENTIALS_GPG_PATH)
+        payload = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    # ---------- /api/fx -----------------------------------------------------
+    def _handle_get_fx(self):
+        """Liefert den aktuellen FX-Cache (Feature 3) read-only ans Frontend.
+        Format: {"base": "USD", "fetched_at": "...", "rates": {...}}.
+
+        Existiert fx_cache.json (noch) nicht, antworten wir 200 mit leeren
+        Rates - das Dashboard zeigt dann einfach keine USD-Aequivalente,
+        statt eine Fehlermeldung zu produzieren."""
+        out = {"base": "USD", "fetched_at": "", "rates": {}}
+        if os.path.isfile(FX_PATH):
+            try:
+                with open(FX_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    out["base"] = str(data.get("base", "USD"))
+                    out["fetched_at"] = str(data.get("fetched_at", ""))
+                    rates = data.get("rates") or {}
+                    if isinstance(rates, dict):
+                        out["rates"] = {
+                            str(k): float(v) for k, v in rates.items()
+                            if isinstance(v, (int, float))
+                        }
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass
+        payload = json.dumps(out, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -537,25 +611,114 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
 # =========================================================================
 # Bootstrap: SMTP-Daten aus credentials.json laden
 # =========================================================================
-def load_credentials():
-    """Liest SMTP_USER und SMTP_PASS aus credentials.json. Fehlt die Datei
-    oder ist sie unlesbar, bleiben die Defaults leer - /send_test_email
-    schlaegt dann mit einer SMTP-Auth-Meldung um, und der Benutzer kann
-    die Daten ueber das Modal nachtragen."""
-    global SMTP_USER, SMTP_PASS
-    if not os.path.isfile(CREDENTIALS_PATH):
+def _decrypt_gpg_credentials():
+    """Entschluesselt credentials.json.gpg in /dev/shm (Feature 2), liest
+    den Klartext sofort in den Prozess-RAM und loescht die RAM-Disk-Datei
+    SOFORT wieder. Damit liegt der Klartext nirgends auf der Disk und nur
+    so lange im RAM, wie der Server-Prozess laeuft.
+
+    Liefert das geparste JSON-Dict zurueck oder None bei Fehler."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not shutil.which("gpg"):
         sys.stderr.write(
-            "[WARN] credentials.json nicht gefunden - SMTP nicht konfiguriert.\n"
+            "[WARN] gpg nicht installiert - credentials.json.gpg kann nicht entschluesselt werden.\n"
         )
-        return
+        return None
+
+    # /dev/shm bevorzugen, sonst TMPDIR (mit Hinweis).
+    if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
+        ramdir = "/dev/shm"
+    else:
+        ramdir = tempfile.gettempdir()
+        sys.stderr.write(
+            "[WARN] /dev/shm nicht verfuegbar - Credentials werden temporaer in %s entschluesselt.\n" % ramdir
+        )
+
+    fd, target = tempfile.mkstemp(prefix="depottracker.server.cred-", suffix=".json", dir=ramdir)
+    os.close(fd)
     try:
-        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        sys.stderr.write(
-            "[WARN] credentials.json konnte nicht gelesen werden: %s\n" % exc
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+
+    # Passphrase-Quellen: env DEPOT_GPG_PASS oder .gpg_passphrase-Datei.
+    pass_args = []
+    pass_file = os.path.join(SCRIPT_DIR, ".gpg_passphrase")
+    env_pass = os.environ.get("DEPOT_GPG_PASS")
+    if env_pass:
+        pass_args = ["--batch", "--yes", "--passphrase", env_pass, "--pinentry-mode", "loopback"]
+    elif os.path.isfile(pass_file):
+        pass_args = ["--batch", "--yes", "--passphrase-file", pass_file, "--pinentry-mode", "loopback"]
+
+    try:
+        result = subprocess.run(
+            ["gpg", *pass_args, "--quiet", "--decrypt",
+             "--output", target, CREDENTIALS_GPG_PATH],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=20,
         )
-        return
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        sys.stderr.write("[WARN] gpg-Aufruf fehlgeschlagen: %s\n" % exc)
+        result = None
+
+    data = None
+    try:
+        if result is not None and result.returncode == 0 and os.path.isfile(target):
+            with open(target, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            err = result.stderr.decode("utf-8", errors="replace") if result else "kein Resultat"
+            sys.stderr.write("[WARN] GPG-Entschluesselung fehlgeschlagen: %s\n" % err.strip())
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write("[WARN] entschluesselte Datei nicht lesbar: %s\n" % exc)
+    finally:
+        # WICHTIG: RAM-Disk-Datei sofort wieder loeschen, egal ob der
+        # Lese-Vorgang erfolgreich war oder nicht. Der Server haelt die
+        # Werte ab hier ausschliesslich im Prozess-RAM.
+        if os.path.exists(target):
+            try:
+                os.unlink(target)
+            except OSError:
+                pass
+
+    return data if isinstance(data, dict) else None
+
+
+def load_credentials():
+    """Vorzugspfad (Feature 2): credentials.json.gpg per GPG nach /dev/shm
+    entschluesseln, sofort lesen und temporaere Datei wieder loeschen.
+    Faellt auf die Klartext-credentials.json zurueck, falls keine GPG-Datei
+    vorhanden ist (Legacy-Pfad fuer Entwicklungsrechner)."""
+    global SMTP_USER, SMTP_PASS
+
+    data = None
+    if os.path.isfile(CREDENTIALS_GPG_PATH):
+        data = _decrypt_gpg_credentials()
+        if data is None:
+            sys.stderr.write(
+                "[WARN] GPG-Pfad fehlgeschlagen - falle auf credentials.json zurueck.\n"
+            )
+
+    if data is None:
+        if not os.path.isfile(CREDENTIALS_PATH):
+            sys.stderr.write(
+                "[WARN] credentials.json nicht gefunden - SMTP nicht konfiguriert.\n"
+            )
+            return
+        try:
+            with open(CREDENTIALS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            sys.stderr.write(
+                "[WARN] credentials.json konnte nicht gelesen werden: %s\n" % exc
+            )
+            return
+
     if isinstance(data, dict):
         SMTP_USER = str(data.get("smtp_user", "") or "")
         SMTP_PASS = str(data.get("smtp_pass", "") or "")

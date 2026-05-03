@@ -77,6 +77,18 @@
         </div>
 
         <nav class="header-meta">
+            <!-- Modus-Badge (Feature 1): wird per JS aus /api/mode gefuellt
+                 und zeigt LIVE oder DEMO an. -->
+            <div class="mode-badge mode-live" id="mode-badge" title="Aktueller Lauf-Modus">
+                <span class="mode-dot"></span>
+                <span class="mode-label" id="mode-label">LIVE</span>
+            </div>
+            <!-- Verschluesselungs-Badge (Feature 2): erscheint, wenn das
+                 Backend credentials.json.gpg verwendet. -->
+            <div class="enc-badge" id="enc-badge" hidden title="Credentials liegen GPG-verschluesselt vor und werden zur Laufzeit nur in RAM (/dev/shm) entschluesselt.">
+                <span aria-hidden="true">🔒</span>
+                <span>GPG</span>
+            </div>
             <div class="status-indicator" id="status-indicator">
                 <span class="status-dot status-ok" id="status-dot"></span>
                 <span class="status-label" id="status-label">System OK</span>
@@ -95,6 +107,11 @@
             <article class="card card-accent">
                 <span class="card-label">Aktueller Depotwert</span>
                 <span class="card-value" data-counter data-target="14820.50" data-suffix=" CHF">0 CHF</span>
+                <!-- Multi-Currency (Feature 3): USD-/EUR-Aequivalent aus /api/fx -->
+                <span class="card-fx" id="card-fx-current" hidden>
+                    <span id="fx-usd">--</span> USD &middot;
+                    <span id="fx-eur">--</span> EUR
+                </span>
                 <span class="card-trend trend-up" id="trend-current">&#9650; +1.42 %</span>
             </article>
 

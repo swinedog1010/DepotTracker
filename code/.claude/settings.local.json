@@ -4,7 +4,10 @@
       "Bash(bash -n \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/depotguard.sh\")",
       "Bash(bash *)",
       "Bash(\"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/venv/bin/python3\" -m py_compile \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/server.py\")",
-      "Bash(python3 -m py_compile \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/server.py\")"
+      "Bash(python3 -m py_compile \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/server.py\")",
+      "Bash(python *)",
+      "Bash(chmod +x ../backup.sh)",
+      "Bash(node --check script.js)"
     ]
   }
 }

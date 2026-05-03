@@ -164,6 +164,107 @@
     }
 
     /* ---------------------------------------------------------------------
+       3b) MODUS-BADGE (Feature 1) + GPG-Indikator (Feature 2)
+           Pollt /api/mode und schaltet das Header-Badge zwischen LIVE
+           und DEMO um. Der GPG-Indikator wird sichtbar, sobald das
+           Backend meldet, dass credentials.json.gpg vorhanden ist.
+       --------------------------------------------------------------------- */
+    const modeBadge = document.getElementById("mode-badge");
+    const modeLabel = document.getElementById("mode-label");
+    const encBadge  = document.getElementById("enc-badge");
+    let lastMode    = null;
+
+    async function refreshMode() {
+        try {
+            const res = await fetch("/api/mode", { cache: "no-store" });
+            if (!res.ok) return;
+            const data = await res.json();
+            const mode = (data && data.mode) === "demo" ? "demo" : "live";
+
+            if (mode !== lastMode) {
+                modeBadge.classList.toggle("mode-live", mode === "live");
+                modeBadge.classList.toggle("mode-demo", mode === "demo");
+                modeLabel.textContent = mode === "demo" ? "DEMO" : "LIVE";
+                if (lastMode !== null) {
+                    showToast(
+                        mode === "demo"
+                            ? "Modus gewechselt: DEMO (Force-Alarm aktiv)"
+                            : "Modus gewechselt: LIVE",
+                        mode === "demo" ? "error" : "success"
+                    );
+                }
+                lastMode = mode;
+            }
+
+            if (encBadge) {
+                encBadge.hidden = !data.credentials_encrypted;
+            }
+        } catch (err) {
+            // Bewusst still: Server kann zwischen Restarts kurz weg sein.
+        }
+    }
+
+    /* ---------------------------------------------------------------------
+       3c) FX-ANZEIGE (Feature 3)
+           Liest /api/fx und zeigt das USD-/EUR-Aequivalent des aktuellen
+           Depotwerts unter der ersten Karte.
+           Achtung: open.er-api.com liefert Kurse mit Basis USD, also
+           gilt rates[CHF] = wieviel CHF kostet 1 USD. Um einen CHF-Betrag
+           in USD umzurechnen, teilen wir durch rates[CHF].
+       --------------------------------------------------------------------- */
+    const cardFx     = document.getElementById("card-fx-current");
+    const fxUsdSpan  = document.getElementById("fx-usd");
+    const fxEurSpan  = document.getElementById("fx-eur");
+
+    function chfTo(currency, fxData, chfValue) {
+        // open.er-api.com nutzt USD als Basis. rates[CHF] gibt also den
+        // CHF-Wert von 1 USD an. Umrechnung CHF -> X:
+        //   1) chfValue / rates.CHF  = Wert in USD
+        //   2) USD * rates[X]        = Wert in Zielwaehrung
+        // Spezialfall: rates enthaelt USD nicht (Basis = 1 wird oft
+        // ausgelassen), dann gilt USD = chf / rates.CHF direkt.
+        const rates = (fxData && fxData.rates) || {};
+        const chfPerUsd = rates.CHF;
+        if (!chfPerUsd) return null;
+        const usd = chfValue / chfPerUsd;
+        if (currency === "USD") return usd;
+        const ratePerUsd = rates[currency];
+        if (!ratePerUsd) return null;
+        return usd * ratePerUsd;
+    }
+
+    async function refreshFx() {
+        try {
+            const res = await fetch("/api/fx", { cache: "no-store" });
+            if (!res.ok) return;
+            const data = await res.json();
+            // Aktueller CHF-Wert aus dem data-target der Hauptkarte.
+            const currentEl = document.querySelector(".card-accent [data-counter]");
+            const chf = currentEl ? parseFloat(currentEl.dataset.target) : NaN;
+            if (!Number.isFinite(chf)) return;
+
+            const usd = chfTo("USD", data, chf);   // USD/USD = 1, also chf/chfPerUsd
+            const eur = chfTo("EUR", data, chf);
+            // Spezialfall USD: chfTo gibt fuer "USD" via rates[USD]=1 zurueck,
+            // sodass das Ergebnis = chf / rates.CHF entspricht.
+
+            if (usd !== null && eur !== null) {
+                fxUsdSpan.textContent = usd.toLocaleString("de-CH", {
+                    minimumFractionDigits: 2, maximumFractionDigits: 2,
+                });
+                fxEurSpan.textContent = eur.toLocaleString("de-CH", {
+                    minimumFractionDigits: 2, maximumFractionDigits: 2,
+                });
+                cardFx.hidden = false;
+            } else {
+                cardFx.hidden = true;
+            }
+        } catch (err) {
+            // Stille Toleranz - FX ist eine Zusatzanzeige, kein Pflichtfeature.
+        }
+    }
+
+    /* ---------------------------------------------------------------------
        4) COUNTER-ANIMATIONEN (Karten zaehlen beim Laden hoch)
        --------------------------------------------------------------------- */
     function animateCounter(el) {
@@ -321,6 +422,13 @@
         }
         renderRunsTable();
         maybeOpenModal();
+        refreshMode();
+        refreshFx();
+        // Modus + FX periodisch nachladen, ohne den Server zu fluten:
+        // Modus alle 5s (wechselt selten, aber Reaktion soll fix sein),
+        // FX alle 5min (wirklich nur ein hoeflicher Heartbeat).
+        setInterval(refreshMode, 5_000);
+        setInterval(refreshFx,   300_000);
     });
 
     // Zeitraum-Chips umschalten (7T / 30T / 90T).

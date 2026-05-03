@@ -154,6 +154,67 @@ ul { list-style: none; padding: 0; margin: 0; }
     animation: pulse 1.2s infinite;
 }
 
+/* Modus-Badge (Feature 1): LIVE = gruen, DEMO = orange/blink */
+.mode-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border-soft);
+    background: var(--bg-elevated);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.mode-badge .mode-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.mode-badge.mode-live { color: var(--success); border-color: rgba(46,204,113,0.45); }
+.mode-badge.mode-live .mode-dot {
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+}
+.mode-badge.mode-demo {
+    color: var(--warning);
+    border-color: rgba(245,166,35,0.55);
+    background: rgba(245,166,35,0.10);
+}
+.mode-badge.mode-demo .mode-dot {
+    background: var(--warning);
+    box-shadow: 0 0 10px var(--warning);
+    animation: pulse 1.4s infinite;
+}
+
+/* Verschluesselungs-Indikator (Feature 2) */
+.enc-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(46,204,113,0.10);
+    color: var(--success);
+    border: 1px solid rgba(46,204,113,0.30);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+}
+
+/* FX-Zusatzanzeige unter dem Hauptwert (Feature 3) */
+.card-fx {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    letter-spacing: 0.4px;
+}
+.card-fx[hidden] { display: none; }
+
 @keyframes pulse {
     0%, 100% { transform: scale(1);   opacity: 1; }
     50%      { transform: scale(1.4); opacity: 0.55; }
