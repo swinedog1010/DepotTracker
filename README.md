@@ -47,9 +47,10 @@ cd DepotTracker
 
 ### 3. Setup ausfuehren
 
-Das mitgelieferte `setup.sh` installiert alle System-Pakete (`libcairo2-dev`, `pkg-config`, `python3-dev`, `python3-venv`), legt die Python-`venv` unter `code/venv/` neu an, installiert alle Pakete aus `code/requirements.txt` und macht `code/depotguard.sh` ausfuehrbar.
+Das mitgelieferte `code/setup.sh` installiert alle System-Pakete (`libcairo2-dev`, `pkg-config`, `python3-dev`, `python3-venv`, `gnupg`, `tar`, `curl`, `jq`), legt die Python-`venv` unter `code/venv/` neu an, installiert alle Pakete aus `code/requirements.txt` und macht `code/depotguard.sh` ausfuehrbar.
 
 ```bash
+cd code
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -169,7 +170,7 @@ Windows-Zeilenenden (CRLF). Auf der WSL-Seite einmal:
 
 ```bash
 sudo apt install -y dos2unix
-dos2unix code/depotguard.sh setup.sh
+dos2unix code/depotguard.sh code/setup.sh code/backup.sh
 ```
 
 ### Dashboard zeigt `404 /api/depot`
@@ -182,16 +183,18 @@ dos2unix code/depotguard.sh setup.sh
 
 ```
 DepotTracker/
-├── setup.sh                    # einmaliges Setup-Skript (apt + venv + pip)
 ├── README.md                   # diese Datei
 ├── MASTER_PROMPT.md            # Projektdokumentation
 ├── ablaufdiagramm.pdf
 └── code/
+    ├── setup.sh                # einmaliges Setup-Skript (apt + venv + pip)
+    ├── backup.sh               # GPG-verschluesseltes Wochen-Backup (Cronjob)
     ├── depotguard.sh           # Bash-Hauptskript fuer den Cronjob
     ├── server.py               # HTTP-Server (Port 8000) fuer Dashboard + API
     ├── requirements.txt        # Python-Abhaengigkeiten
     ├── credentials.example.json
     ├── credentials.json        # (lokal, via .gitignore ausgeschlossen)
+    ├── credentials.json.gpg    # (optional, Feature 2: GPG-verschluesselte Variante)
     ├── index.html              # Dashboard-UI
     ├── script.js
     ├── style.css

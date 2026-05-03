@@ -7,7 +7,13 @@
       "Bash(python3 -m py_compile \"C:/Users/viggo/OneDrive/Desktop/DepotTracker/Code/server.py\")",
       "Bash(python *)",
       "Bash(chmod +x ../backup.sh)",
-      "Bash(node --check script.js)"
+      "Bash(node --check script.js)",
+      "Bash(git -C .. ls-files)",
+      "Bash(grep -E \"\\(script\\\\.js|backup\\\\.sh|setup\\\\.sh\\)$\")",
+      "Bash(git -C .. mv backup.sh code/backup.sh)",
+      "Bash(git -C .. mv setup.sh code/setup.sh)",
+      "Bash(git -C .. rm script.js)",
+      "Bash(git *)"
     ]
   }
 }

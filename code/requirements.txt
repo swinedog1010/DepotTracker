@@ -1,13 +1,13 @@
 # DepotTracker - Python-Abhaengigkeiten
 # ---------------------------------------------------------------
-# Diese Liste wird von ../setup.sh und von code/depotguard.sh
-# (setup_python_env) verwendet, um die venv unter code/venv/
+# Diese Liste wird von ./setup.sh und von ./depotguard.sh
+# (setup_python_env) verwendet, um die venv unter ./venv/
 # vollstaendig einzurichten.
 #
 # Hinweis WSL/Ubuntu:
 #   svglib + cairosvg benoetigen die System-Bibliothek libcairo2-dev
 #   sowie pkg-config / python3-dev zum Kompilieren von cffi/pycairo.
-#   Diese Pakete installiert ../setup.sh per "sudo apt".
+#   Diese Pakete installiert ./setup.sh per "sudo apt".
 qrbill
 svglib
 reportlab

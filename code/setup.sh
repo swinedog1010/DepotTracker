@@ -23,9 +23,11 @@ set -euo pipefail
 
 # -----------------------------------------------------------------------------
 # Pfade ermitteln (absolut, unabhaengig vom Aufrufpunkt)
+# Hinweis: setup.sh liegt seit dem Aufraeumen im selben Ordner wie
+# depotguard.sh / requirements.txt - SCRIPT_DIR IST das Code-Verzeichnis.
 # -----------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CODE_DIR="${SCRIPT_DIR}/code"
+CODE_DIR="${SCRIPT_DIR}"
 VENV_DIR="${CODE_DIR}/venv"
 REQUIREMENTS="${CODE_DIR}/requirements.txt"
 DEPOTGUARD="${CODE_DIR}/depotguard.sh"
@@ -47,10 +49,10 @@ fail() { printf "%b[FEHLER]%b  %s\n" "$C_RED"   "$C_RESET" "$*" >&2; exit 1; }
 # -----------------------------------------------------------------------------
 # Vorbedingungen
 # -----------------------------------------------------------------------------
-[[ -d "$CODE_DIR" ]] \
-    || fail "Verzeichnis 'code/' nicht gefunden unter $CODE_DIR"
 [[ -f "$REQUIREMENTS" ]] \
-    || fail "code/requirements.txt fehlt - Setup kann keine Pakete installieren."
+    || fail "requirements.txt fehlt unter $REQUIREMENTS - Setup kann keine Pakete installieren."
+[[ -f "$DEPOTGUARD" ]] \
+    || fail "depotguard.sh fehlt unter $DEPOTGUARD - Setup im falschen Verzeichnis ausgefuehrt?"
 
 # -----------------------------------------------------------------------------
 # 1) System-Abhaengigkeiten via apt
@@ -129,13 +131,13 @@ echo
 ok "Setup abgeschlossen."
 echo
 printf "Naechste Schritte:\n"
-printf "  1. Trage deine Gmail-Daten in code/credentials.json ein\n"
-printf "     (Vorlage: code/credentials.example.json, Anleitung in README.md).\n"
+printf "  1. Trage deine Gmail-Daten in credentials.json ein\n"
+printf "     (Vorlage: credentials.example.json, Anleitung in README.md).\n"
 printf "  2. (Optional, empfohlen) Verschluessle die Datei einmalig mit GPG:\n"
-printf "        cd code && ./depotguard.sh --encrypt-credentials\n"
+printf "        ./depotguard.sh --encrypt-credentials\n"
 printf "     Danach existiert nur noch credentials.json.gpg, der Klartext\n"
 printf "     wird bei jedem Lauf nur in /dev/shm entschluesselt.\n"
-printf "  3. Starte den Tracker:    cd code && ./depotguard.sh\n"
+printf "  3. Starte den Tracker:    ./depotguard.sh\n"
 printf "  4. Dashboard im Browser:  http://localhost:8000\n"
 printf "  5. Backups einrichten:    ./backup.sh --install-cron\n"
 echo

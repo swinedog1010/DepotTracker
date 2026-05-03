@@ -29,7 +29,11 @@ set -euo pipefail
 # Pfade und Konfiguration
 # -----------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+# backup.sh liegt seit dem Aufraeumen unter code/. Das Wurzelverzeichnis,
+# das wir als tar.gz sichern wollen, ist genau eine Ebene darueber - z.B.
+# .../DepotTracker. Wir resolven es absolut, damit auch Cron- und CI-
+# Aufrufe (mit anderem CWD) den richtigen Ordner sichern.
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BACKUP_DIR="${DEPOT_BACKUP_DIR:-${HOME}/depottracker_backups}"
 BACKUP_KEEP="${DEPOT_BACKUP_KEEP:-8}"     # ~ 2 Monate bei woechentlichem Lauf
 PASS_FILE_DEFAULT="${HOME}/.depottracker/backup.pass"
@@ -88,10 +92,11 @@ install_cron() {
         warn "crontab nicht verfuegbar - Cron-Setup uebersprungen."
         return 1
     fi
-    local cron_cmd="${CRON_SCHEDULE} ${PROJECT_ROOT}/backup.sh >> ${BACKUP_DIR}/backup.log 2>&1"
+    # SCRIPT_DIR (nicht PROJECT_ROOT) - backup.sh liegt unter code/.
+    local cron_cmd="${CRON_SCHEDULE} ${SCRIPT_DIR}/backup.sh >> ${BACKUP_DIR}/backup.log 2>&1"
     local existing
     existing="$(crontab -l 2>/dev/null || true)"
-    if echo "$existing" | grep -qF "${PROJECT_ROOT}/backup.sh"; then
+    if echo "$existing" | grep -qF "${SCRIPT_DIR}/backup.sh"; then
         info "Cronjob fuer backup.sh bereits aktiv."
         return 0
     fi
