@@ -165,57 +165,37 @@
 
     /* ---------------------------------------------------------------------
        3b) MODUS-BADGE (Feature 1) + GPG-Indikator (Feature 2)
-           Pollt /api/mode und schaltet das Header-Badge zwischen LIVE,
-           SIMULATION und READ-ONLY um. Der GPG-Indikator wird sichtbar,
+           Pollt /api/mode und schaltet das Header-Badge zwischen LIVE
+           (gruen) und DEMO (blau) um. Der Modus kommt aus der Env-Var
+           DEPOT_MODE (von depotguard.sh beim Server-Start gesetzt) oder
+           als Fallback aus mode.json. Der GPG-Indikator wird sichtbar,
            sobald das Backend meldet, dass credentials.json.gpg vorhanden
-           ist. Im READ-ONLY-Modus wird zusaetzlich body.is-readonly
-           gesetzt, was alle Schreib-Buttons (Demo-Mail, Scan, Empfaenger
-           aendern) deaktiviert.
+           ist (Feature 2).
        --------------------------------------------------------------------- */
     const modeBadge = document.getElementById("mode-badge");
     const modeLabel = document.getElementById("mode-label");
     const encBadge  = document.getElementById("enc-badge");
-    const VALID_MODES = ["live", "simulation", "read-only"];
-    const MODE_LABELS = {
-        "live":      "LIVE",
-        "simulation":"SIMULATION",
-        "read-only": "READ-ONLY",
-    };
+    const VALID_MODES = ["live", "demo"];
+    const MODE_LABELS = { "live": "LIVE", "demo": "DEMO" };
     let lastMode = null;
-
-    function applyModeLock(mode) {
-        // body-Klasse fuer CSS + harte Disable-Flags fuer Schreib-Buttons.
-        const ro = (mode === "read-only");
-        document.body.classList.toggle("is-readonly", ro);
-        const writeButtons = [
-            document.getElementById("scan-now-btn"),
-            document.getElementById("demo-email-btn"),
-            document.getElementById("change-email-btn"),
-        ].filter(Boolean);
-        writeButtons.forEach((b) => { b.disabled = ro; });
-    }
 
     async function refreshMode() {
         try {
             const res = await fetch("/api/mode", { cache: "no-store" });
             if (!res.ok) return;
             const data = await res.json();
-            const raw = (data && data.mode) || "read-only";
-            const mode = VALID_MODES.includes(raw) ? raw : "read-only";
+            const raw = (data && data.mode) || "live";
+            const mode = VALID_MODES.includes(raw) ? raw : "live";
 
             if (mode !== lastMode) {
-                modeBadge.classList.remove("mode-live", "mode-simulation", "mode-readonly");
-                modeBadge.classList.add(
-                    mode === "live" ? "mode-live" :
-                    mode === "simulation" ? "mode-simulation" : "mode-readonly"
-                );
+                modeBadge.classList.remove("mode-live", "mode-demo");
+                modeBadge.classList.add(mode === "demo" ? "mode-demo" : "mode-live");
                 modeLabel.textContent = MODE_LABELS[mode];
-                applyModeLock(mode);
                 if (lastMode !== null) {
-                    const toastType = mode === "live" ? "error"
-                                    : mode === "simulation" ? "error"
-                                    : "success";
-                    showToast("Modus gewechselt: " + MODE_LABELS[mode], toastType);
+                    showToast(
+                        "Modus gewechselt: " + MODE_LABELS[mode],
+                        mode === "demo" ? "error" : "success"
+                    );
                 }
                 lastMode = mode;
             }
@@ -225,28 +205,6 @@
             }
         } catch (err) {
             // Bewusst still: Server kann zwischen Restarts kurz weg sein.
-        }
-    }
-
-    /* Paper-Trading-Karte (Feature 1, Simulationsmodus) - polled die
-       Paper-Daten und schaltet die Card sichtbar, sobald paper_depot.json
-       existiert. Andernfalls bleibt sie ausgeblendet. */
-    const paperCard    = document.getElementById("paper-card");
-    const paperBalance = document.getElementById("paper-balance");
-    const paperSub     = document.getElementById("paper-sub");
-
-    async function refreshPaper() {
-        if (!paperCard) return;
-        try {
-            const res = await fetch("/api/paper", { cache: "no-store" });
-            if (!res.ok) { paperCard.hidden = true; return; }
-            const data = await res.json();
-            if (!data.exists) { paperCard.hidden = true; return; }
-            paperBalance.textContent = formatCHF(data.balance_chf) + " CHF";
-            paperSub.textContent = "Start: " + formatCHF(data.starting_balance_chf) + " CHF";
-            paperCard.hidden = false;
-        } catch (err) {
-            paperCard.hidden = true;
         }
     }
 
@@ -449,14 +407,12 @@
         maybeOpenModal();
         refreshMode();
         refreshFx();
-        refreshPaper();
-        // Modus + FX + Paper periodisch nachladen, ohne den Server zu
-        // fluten: Modus alle 5s (Reaktion soll fix sein), FX alle 5min
-        // (open.er-api hat keine harten Limits, wir bleiben aber fair),
-        // Paper alle 30s (Saldo aendert sich nur bei depotguard-Lauf).
-        setInterval(refreshMode,  5_000);
-        setInterval(refreshFx,    300_000);
-        setInterval(refreshPaper, 30_000);
+        // Modus + FX periodisch nachladen, ohne den Server zu fluten:
+        // Modus alle 5s (Reaktion soll fix sein, wenn der Lehrer mode
+        // wechselt), FX alle 5min (open.er-api hat keine harten Limits,
+        // wir bleiben aber fair).
+        setInterval(refreshMode, 5_000);
+        setInterval(refreshFx,   300_000);
     });
 
     // Zeitraum-Chips umschalten (7T / 30T / 90T).

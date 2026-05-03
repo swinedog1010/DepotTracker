@@ -47,12 +47,11 @@ DEPOTGUARD_PATH = os.path.join(SCRIPT_DIR, "depotguard.sh")
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
 CREDENTIALS_GPG_PATH = os.path.join(SCRIPT_DIR, "credentials.json.gpg")  # Feature 2
 RECIPIENT_PATH = os.path.join(SCRIPT_DIR, "recipient.json")   # Empfaenger-Mail (Single Source of Truth)
-MODE_PATH = os.path.join(SCRIPT_DIR, "mode.json")             # live/simulation/read-only (Feature 1)
+MODE_PATH = os.path.join(SCRIPT_DIR, "mode.json")             # live/demo (Feature 1)
 FX_PATH = os.path.join(SCRIPT_DIR, "fx_cache.json")           # FX-Rates (Feature 3)
-PAPER_PATH = os.path.join(SCRIPT_DIR, "paper_depot.json")     # Paper-Trading (Feature 1)
 
-# Erlaubte Modi - jede andere Eingabe wird zu read-only normalisiert.
-VALID_MODES = ("live", "simulation", "read-only")
+# Erlaubte Modi - jede andere Eingabe wird zu "live" normalisiert (Default).
+VALID_MODES = ("live", "demo")
 
 # FX (Feature 3): server.py uebernimmt den eigentlichen Abruf, depotguard.sh
 # nutzt denselben Cache nur defensiv. open.er-api.com benoetigt keinen Key.
@@ -273,10 +272,20 @@ def write_recipient(email):
 
 
 def read_mode_state():
-    """Liest mode.json und normalisiert den Wert auf einen der drei
-    erlaubten Modi. Default ist read-only - der sicherste Stand fuer das
-    Frontend (deaktiviert alle Schreib-Aktionen)."""
-    state = {"mode": "read-only", "set_at": ""}
+    """Ermittelt den aktuellen Lauf-Modus. Reihenfolge:
+       1) Environment-Variable DEPOT_MODE (von depotguard.sh beim Start
+          des Servers gesetzt - Spec: "via Environment Variable").
+       2) mode.json im Code-Ordner (persistent zwischen Lauefen).
+       3) Default: "live".
+       Jede Eingabe ausserhalb VALID_MODES wird auf "live" normalisiert."""
+    state = {"mode": "live", "set_at": "", "source": "default"}
+
+    env_mode = (os.environ.get("DEPOT_MODE") or "").strip().lower()
+    if env_mode in VALID_MODES:
+        state["mode"] = env_mode
+        state["source"] = "env"
+        return state
+
     if os.path.isfile(MODE_PATH):
         try:
             with open(MODE_PATH, "r", encoding="utf-8") as f:
@@ -285,6 +294,7 @@ def read_mode_state():
                 mode = (data.get("mode") or "").strip().lower()
                 if mode in VALID_MODES:
                     state["mode"] = mode
+                    state["source"] = "file"
                 state["set_at"] = str(data.get("set_at") or "")
         except (OSError, json.JSONDecodeError):
             pass
@@ -404,28 +414,6 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
 
     # ---------- POST-Routing -------------------------------------------------
     def do_POST(self):
-        # Read-Only-Sperre (Feature 1): jeder schreibende Endpoint wird
-        # geblockt, sobald mode.json den Wert "read-only" hat. Das
-        # Frontend deaktiviert die Buttons zwar selbst, aber hier kommt
-        # die zweite Verteidigungslinie - falls jemand das UI umgeht.
-        current_mode = read_mode_state().get("mode", "read-only")
-        if self.path in ("/save_email", "/save_smtp", "/send_test_email"):
-            if current_mode == "read-only":
-                self._respond_json(
-                    423, False,
-                    "READ-ONLY-Modus aktiv - Schreib-Operationen sind gesperrt.",
-                )
-                return
-            # Im SIMULATION-Modus erlauben wir das Speichern der Empfaenger-
-            # Adresse, sperren aber den echten Mailversand, damit die
-            # Lehrer-Demo nie zufaellig eine echte Test-Mail rausschickt.
-            if current_mode == "simulation" and self.path == "/send_test_email":
-                self._respond_json(
-                    409, False,
-                    "SIMULATIONS-Modus aktiv - kein Mailversand. In LIVE-Modus wechseln.",
-                )
-                return
-
         if self.path == "/save_email":
             self._handle_save_email()
         elif self.path == "/save_smtp":
@@ -453,9 +441,6 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/fx":
             self._handle_get_fx()
-            return
-        if self.path == "/api/paper":
-            self._handle_get_paper()
             return
         super().do_GET()
 
@@ -515,14 +500,14 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
     # ---------- /api/mode ---------------------------------------------------
     def _handle_get_mode(self):
         """Liefert den aktuellen Lauf-Modus (Feature 1) als JSON.
-        Format: {"mode": "live"|"simulation"|"read-only", "set_at": "..."}.
+        Format: {"mode": "live"|"demo", "set_at": "...", "source": "..."}.
 
-        Ist mode.json nicht vorhanden oder enthaelt sie einen unbekannten
-        Wert, antworten wir mit "read-only" - das ist der sicherste Default
-        fuer das Frontend (deaktiviert alle Schreib-Buttons). Zusaetzlich
-        melden wir, ob fuer credentials.json.gpg eine GPG-Datei existiert
-        (Feature 2), damit das Dashboard signalisiert, dass die Credentials
-        sicher verschluesselt liegen."""
+        Quelle ist primaer die Environment-Variable DEPOT_MODE
+        (von depotguard.sh beim Server-Start gesetzt), als Fallback
+        mode.json im Projekt-Ordner. Default ist "live". Zusaetzlich
+        melden wir, ob credentials.json.gpg existiert (Feature 2), damit
+        das Dashboard signalisiert, dass die Credentials sicher
+        verschluesselt liegen."""
         payload_obj = read_mode_state()
         # Sichtbares Sicherheits-Indiz fuer das Dashboard.
         payload_obj["credentials_encrypted"] = os.path.isfile(CREDENTIALS_GPG_PATH)
@@ -558,41 +543,6 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
                     str(k): float(v) for k, v in rates.items()
                     if isinstance(v, (int, float))
                 }
-        payload = json.dumps(out, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    # ---------- /api/paper --------------------------------------------------
-    def _handle_get_paper(self):
-        """Liefert den Stand des Paper-Trading-Depots (Feature 1). Existiert
-        paper_depot.json nicht, antworten wir mit leerem Objekt - das ist
-        kein Fehler, sondern bedeutet, dass der User noch nie im
-        SIMULATION-Modus gestartet hat."""
-        out = {
-            "starting_balance_chf": 0,
-            "balance_chf": 0,
-            "history": [],
-            "exists": False,
-        }
-        if os.path.isfile(PAPER_PATH):
-            try:
-                with open(PAPER_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    out["starting_balance_chf"] = float(data.get("starting_balance_chf", 0) or 0)
-                    out["balance_chf"] = float(data.get("balance_chf", 0) or 0)
-                    hist = data.get("history") or []
-                    if isinstance(hist, list):
-                        # Nur die letzten 60 Punkte ausliefern - reicht fuer
-                        # einen aussagekraeftigen Verlauf, hilt das Frontend schlank.
-                        out["history"] = hist[-60:]
-                    out["exists"] = True
-            except (OSError, json.JSONDecodeError, ValueError):
-                pass
         payload = json.dumps(out, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")

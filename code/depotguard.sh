@@ -160,21 +160,15 @@ FX_QUOTE_CURRENCIES="CHF EUR GBP JPY"
 FX_CACHE_MAX_AGE=43200    # 12 Stunden - FX bewegt sich kaum, schont das Limit.
 
 # --- Modus (Feature 1) ------------------------------------------------------
-# DEPOT_MODE kennt drei Zustaende, die in prompt_for_mode() gesetzt werden:
-#   "live"        -> echte CoinGecko-Kurse, Mailversand bei Alarm.
-#                    Erfordert eine doppelte Sicherheitsbestaetigung,
-#                    weil hier wirklich E-Mails an Dritte rausgehen.
-#   "simulation"  -> Paper-Trading. Es wird KEINE API kontaktiert; der
-#                    Wert wandert per lokalem Random-Walk aus
-#                    paper_depot.json (Startguthaben 100 CHF). Alarme
-#                    werden nur lokal protokolliert, NICHT verschickt.
-#   "read-only"   -> Reine Anzeige. Es wird nichts geschrieben, nichts
-#                    versendet, keine API kontaktiert. Das Dashboard
-#                    sperrt schreibende Buttons.
+# DEPOT_MODE kennt zwei Zustaende, die in prompt_for_mode() gesetzt werden:
+#   "live"  -> Normales Monitoring: echte CoinGecko-Kurse, Alarm + QR-PDF
+#              + Mailversand erst, wenn die Schwelle wirklich
+#              unterschritten wird.
+#   "demo"  -> Praesentations-Modus: aktueller Kurs wird ignoriert, ein
+#              massiver Verlust wird simuliert, QR-Rechnung + Mail werden
+#              SOFORT verschickt. Der Mailversand ist Teil der Demo, nicht
+#              gesperrt - Sinn ist, das Lehrer-Postfach zu treffen.
 DEPOT_MODE="live"
-PAPER_FILE="${SCRIPT_DIR}/paper_depot.json"
-PAPER_STARTING_BALANCE=100      # CHF, gemaess Spec
-PAPER_VOLATILITY=0.05           # +/- 5 % Random-Walk pro Lauf
 
 # --- E-Mail-Konfiguration ---------------------------------------------------
 # EMAIL_RECIPIENT wird zur Laufzeit aus recipient.json geladen (Terminal-Setup
@@ -350,115 +344,49 @@ save_mode() {
     mv "$tmp" "$MODE_FILE"
 }
 
-confirm_live_mode() {
-    # Doppelte Sicherheitsabfrage VOR dem Aktivieren des Live-Modus. Erst
-    # eine Tippbestaetigung ("LIVE" wortwoertlich), dann ein finales [y/N].
-    # So vermeiden wir, dass ein Klick auf "1" + Enter aus Versehen echte
-    # Mails an Dritte verschickt. Bei Abbruch fallen wir auf "simulation"
-    # zurueck - das ist der sicherste Default.
-    printf "\n%bACHTUNG:%b LIVE schickt im Alarmfall echte E-Mails an die\n" "$C_RED" "$C_RESET"
-    printf "  hinterlegte Empfaenger-Adresse und nutzt das CoinGecko-API-\n"
-    printf "  Kontingent. Bitte zur Bestaetigung das Wort %bLIVE%b tippen: " "$C_YELLOW" "$C_RESET"
-    local typed=""
-    IFS= read -r typed </dev/tty || typed=""
-    if [[ "$typed" != "LIVE" ]]; then
-        printf "%bAbgebrochen - kein \"LIVE\" eingegeben.%b\n" "$C_RED" "$C_RESET"
-        return 1
-    fi
-
-    printf "Wirklich Live-Modus aktivieren? [y/N] "
-    local final=""
-    IFS= read -r final </dev/tty || final=""
-    if [[ ! "$final" =~ ^[YyJj]$ ]]; then
-        printf "%bAbgebrochen.%b\n" "$C_RED" "$C_RESET"
-        return 1
-    fi
-    return 0
-}
-
 prompt_for_mode() {
-    # Fragt VOR der E-Mail-Eingabe nach dem Lauf-Modus. Drei Optionen:
-    #   1 = LIVE        -> echte Kurse, echte E-Mails (mit Doppelbestaetigung)
-    #   2 = SIMULATION  -> Paper-Trading auf paper_depot.json (100 CHF Start)
-    #   3 = READ-ONLY   -> reine Anzeige, kein Schreiben, kein Versand
-    #
-    # Default ist SIMULATION (sicherster Stand). Bei nicht-interaktiven
-    # Cronjob-Laeufen wird die Abfrage uebersprungen und der zuletzt
-    # gespeicherte Modus aus mode.json beibehalten - faellt mode.json
-    # weg, gilt READ-ONLY (immer noch sicherer als versehentliche Mails).
+    # Fragt VOR der E-Mail-Eingabe nach dem Lauf-Modus. Zwei Optionen:
+    #   1 = LIVE  -> Normal-Monitoring (echte Kurse, Alarm bei Schwelle)
+    #   2 = DEMO  -> Praesentations-Modus: simuliert sofort einen massiven
+    #               Verlust und schickt die Alarm-Mail samt QR-PDF raus.
+    # Default ist LIVE - das ist der ueblicherweise gewollte Modus fuer
+    # Cron-Laeufe. Bei nicht-interaktiven Laeufen (Cronjob ohne TTY) wird
+    # die Abfrage uebersprungen und LIVE beibehalten.
     if [[ ! -t 0 && ! -e /dev/tty ]]; then
-        if [[ -f "$MODE_FILE" ]]; then
-            DEPOT_MODE="$("$VENV_PYTHON" - "$MODE_FILE" <<'PYEOF' 2>/dev/null || echo read-only
-import json, sys
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as f:
-        data = json.load(f)
-    mode = (data.get("mode") or "").strip().lower()
-    if mode not in ("live", "simulation", "read-only"):
-        mode = "read-only"
-    print(mode)
-except Exception:
-    print("read-only")
-PYEOF
-)"
-            log INFO "Keine TTY - benutze gespeicherten Modus: $DEPOT_MODE"
-        else
-            DEPOT_MODE="read-only"
-            log INFO "Keine TTY - faelle auf READ-ONLY zurueck (sicherer Default)."
-        fi
+        DEPOT_MODE="live"
         save_mode "$DEPOT_MODE"
+        log INFO "Keine TTY - bleibe im LIVE-Modus (Cron-Lauf)."
         return 0
     fi
 
     printf "\n%b┌─ DepotTracker - Modus waehlen ───────────────────────────┐%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b│ [1] LIVE        - Echte Kurse, echte E-Mails  (DOPPELT)   │%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b│ [2] SIMULATION  - Paper-Trading (100 CHF Start), kein Mail│%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b│ [3] READ-ONLY   - Nur Anzeige, kein Schreiben/Versand     │%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ [1] LIVE  - Normal-Monitoring, Alarm bei Unterschreitung  │%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ [2] DEMO  - Force-Alarm: sofort QR-Rechnung + Mailversand │%b\n" "$C_YELLOW" "$C_RESET"
     printf "%b└───────────────────────────────────────────────────────────┘%b\n\n" "$C_YELLOW" "$C_RESET"
 
-    local choice="" attempt picked=""
+    local choice="" attempt
     for attempt in 1 2 3; do
-        printf "Auswahl [1/2/3] (Default: 2): "
+        printf "Auswahl [1/2] (Default: 1): "
         if ! IFS= read -r choice </dev/tty; then
-            choice="2"
+            choice="1"
         fi
-        choice="${choice:-2}"
+        choice="${choice:-1}"
         case "$choice" in
-            1|live|LIVE|l|L)
-                if confirm_live_mode; then
-                    picked="live"
-                else
-                    picked="simulation"
-                    log WARN "Live-Bestaetigung fehlgeschlagen - falle auf SIMULATION zurueck."
-                fi
-                break ;;
-            2|sim|SIM|simulation|SIMULATION|s|S)
-                picked="simulation"; break ;;
-            3|ro|RO|read|READ|"read-only"|"READ-ONLY"|r|R)
-                picked="read-only"; break ;;
-            *)
-                printf "%bUngueltig - bitte 1, 2 oder 3 eingeben.%b\n\n" "$C_RED" "$C_RESET"
-                choice="" ;;
+            1|live|LIVE|l|L) DEPOT_MODE="live"; break ;;
+            2|demo|DEMO|d|D) DEPOT_MODE="demo"; break ;;
+            *) printf "%bUngueltig - bitte 1 oder 2 eingeben.%b\n\n" "$C_RED" "$C_RESET"; choice="" ;;
         esac
     done
 
-    DEPOT_MODE="${picked:-simulation}"
+    [[ -z "$choice" ]] && DEPOT_MODE="live"
     save_mode "$DEPOT_MODE"
 
-    case "$DEPOT_MODE" in
-        live)
-            printf "%b>>> LIVE-MODUS aktiv - echter Mailversand bei Alarm. <<<%b\n\n" "$C_RED" "$C_RESET"
-            log SUCCESS "Modus: LIVE (echte Kurse, echter Versand)"
-            ;;
-        simulation)
-            printf "%b>>> SIMULATION aktiv - Paper-Trading, keine echten Mails. <<<%b\n\n" "$C_YELLOW" "$C_RESET"
-            log SUCCESS "Modus: SIMULATION (Paper-Depot 100 CHF)"
-            ;;
-        read-only)
-            printf "%b>>> READ-ONLY aktiv - reine Anzeige. <<<%b\n\n" "$C_GREEN" "$C_RESET"
-            log SUCCESS "Modus: READ-ONLY"
-            ;;
-    esac
+    if [[ "$DEPOT_MODE" == "demo" ]]; then
+        printf "%b>>> DEMO-MODUS aktiv - Alarm wird simuliert, Mail geht raus. <<<%b\n\n" "$C_RED" "$C_RESET"
+        log SUCCESS "Modus: DEMO (Force-Alarm + Mailversand)"
+    else
+        log SUCCESS "Modus: LIVE (echte Kurse)"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -1211,77 +1139,6 @@ PYEOF
 }
 
 # -----------------------------------------------------------------------------
-# 10c) PAPER-TRADING (Simulationsmodus, Feature 1)
-# -----------------------------------------------------------------------------
-init_paper_depot() {
-    # Legt paper_depot.json mit dem Startguthaben (PAPER_STARTING_BALANCE
-    # = 100 CHF) an, falls die Datei noch nicht existiert. Die Datei wird
-    # ausschliesslich vom Simulationsmodus geschrieben - in Live oder
-    # Read-Only ruehren wir sie nicht an.
-    [[ -f "$PAPER_FILE" ]] && return 0
-
-    PAPER_OUT="$PAPER_FILE" \
-    PAPER_BAL="$PAPER_STARTING_BALANCE" \
-    "$VENV_PYTHON" - <<'PYEOF'
-import json, os, tempfile
-from datetime import datetime, timezone
-target = os.environ["PAPER_OUT"]
-data = {
-    "starting_balance_chf": float(os.environ["PAPER_BAL"]),
-    "balance_chf": float(os.environ["PAPER_BAL"]),
-    "history": [],
-    "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-}
-d = os.path.dirname(target) or "."
-fd, tmp = tempfile.mkstemp(prefix="paper.", suffix=".tmp", dir=d)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-    f.write("\n")
-os.replace(tmp, target)
-PYEOF
-    log SUCCESS "Paper-Depot initialisiert: $PAPER_FILE (Start ${PAPER_STARTING_BALANCE} CHF)"
-}
-
-run_paper_step() {
-    # Ein Simulationsschritt: Random-Walk +/- PAPER_VOLATILITY auf den
-    # aktuellen Saldo. Schreibt den neuen Wert plus Eintrag in der
-    # internen history-Liste. Liefert den neuen Saldo (zwei Nachkomma-
-    # stellen) auf STDOUT zurueck - so kann main() ihn weiterverwenden,
-    # ohne paper_depot.json erneut zu lesen.
-    PAPER_OUT="$PAPER_FILE" \
-    PAPER_VOL="$PAPER_VOLATILITY" \
-    "$VENV_PYTHON" - <<'PYEOF'
-import json, os, random, tempfile
-from datetime import datetime, timezone
-target = os.environ["PAPER_OUT"]
-vol    = float(os.environ["PAPER_VOL"])
-with open(target, "r", encoding="utf-8") as f:
-    data = json.load(f)
-old = float(data.get("balance_chf", 0.0))
-# Random-Walk: gleichverteilt in [-vol, +vol], multiplikativ.
-delta = random.uniform(-vol, vol)
-new   = max(0.0, old * (1.0 + delta))
-entry = {
-    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    "balance_chf": round(new, 2),
-    "delta_pct":   round(delta * 100.0, 4),
-}
-data["balance_chf"] = round(new, 2)
-hist = data.get("history") or []
-hist.append(entry)
-# Bei langen Lauefen die History begrenzen, damit die Datei klein bleibt.
-data["history"] = hist[-500:]
-d = os.path.dirname(target) or "."
-fd, tmp = tempfile.mkstemp(prefix="paper.", suffix=".tmp", dir=d)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-    f.write("\n")
-os.replace(tmp, target)
-print("%.2f" % new)
-PYEOF
-}
-
-# -----------------------------------------------------------------------------
 # 11) DEPOTWERT BERECHNEN (Fliesskomma via awk)
 # -----------------------------------------------------------------------------
 calculate_total() {
@@ -1710,12 +1567,16 @@ kill_existing_server() {
 
 start_server_background() {
     # Startet server.py im Hintergrund und legt PID + Logfile ab.
+    # Den aktuellen Modus (LIVE / DEMO) reichen wir per Environment-
+    # Variable DEPOT_MODE an den Subprozess weiter (Feature 1, Spec).
+    # Der Server liest die Variable in load_mode_state() ein und liefert
+    # sie via /api/mode an das Frontend.
     local server_log="${LOG_DIR}/server.log"
     local pid_file="${SCRIPT_DIR}/server.pid"
-    log INFO "Starte Dashboard im Hintergrund -> $server_log"
+    log INFO "Starte Dashboard im Hintergrund (Modus: $DEPOT_MODE) -> $server_log"
     # nohup koppelt den Prozess vom Terminal ab, damit das Dashboard
     # weiterlaeuft, auch wenn das Skript endet.
-    nohup "$VENV_PYTHON" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
+    DEPOT_MODE="$DEPOT_MODE" nohup "$VENV_PYTHON" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
     echo $! > "$pid_file"
     # Kurze Wartezeit, damit der Server hochfaehrt, bevor wir das Banner
     # mit der URL ausgeben.
@@ -1789,53 +1650,38 @@ main() {
     load_credentials || true
 
     # ------------------------------------------------------------------
-    # 6) READ-ONLY-PFAD (Feature 1): wirklich nichts schreiben oder
-    #    versenden. Wir starten nur das Dashboard, damit der Nutzer den
-    #    bestehenden Datenstand sehen kann. Keine API-Calls, keine
-    #    History-Eintraege, keine Alarme.
+    # 6) DEMO-PFAD (Feature 1): simulierter Kurssturz, Alarm SOFORT.
+    #    Greift NICHT auf CoinGecko zu, ruft aber bewusst handle_alarm()
+    #    auf, sodass die unveraenderte Kern-Pipeline (QR-PDF + Mail-
+    #    versand) durchlaeuft - genau das wollen wir bei der Lehrer-
+    #    Praesentation zeigen. Anschliessend wird das Dashboard
+    #    gestartet, damit das LIVE-/DEMO-Badge sofort sichtbar ist.
     # ------------------------------------------------------------------
-    if [[ "$DEPOT_MODE" == "read-only" ]]; then
-        log INFO "READ-ONLY-MODUS - keine Schreib- oder Versand-Operationen."
-        maybe_start_dashboard
-        log INFO "=== DepotTracker READ-ONLY-Lauf beendet ==="
-        return 0
-    fi
+    if [[ "$DEPOT_MODE" == "demo" ]]; then
+        log WARN "DEMO-MODUS - simuliere massiven Kurssturz."
 
-    # ------------------------------------------------------------------
-    # 7) SIMULATIONS-PFAD (Feature 1): Paper-Trading auf paper_depot.json.
-    #    Es wird KEINE API kontaktiert und KEINE E-Mail verschickt. Bei
-    #    einem simulierten Unter-Schwellen-Wert wird zwar in history.csv
-    #    ein "ALARM (sim)" geschrieben, das tatsaechliche handle_alarm
-    #    bleibt aussen vor.
-    # ------------------------------------------------------------------
-    if [[ "$DEPOT_MODE" == "simulation" ]]; then
-        log WARN "SIMULATION - Paper-Trading-Schritt auf $PAPER_FILE."
+        # FX-Rates trotzdem laden, damit das Dashboard im Demo-Modus
+        # USD-Aequivalente anzeigen kann (Feature 3). Fehlertolerant.
+        fetch_fx_rates || true
 
-        init_paper_depot
+        local demo_total="500.00"
+        local demo_ath
+        demo_ath="$(awk 'BEGIN{print 14820.00}')"
+        local demo_loss demo_loss_pct
+        demo_loss="$(awk -v a="$demo_ath" -v t="$demo_total" 'BEGIN{printf "%.2f", a - t}')"
+        demo_loss_pct="$(awk -v a="$demo_ath" -v t="$demo_total" \
+                        'BEGIN{printf "%.2f", (a - t) / a * 100}')"
 
-        local sim_total
-        sim_total="$(run_paper_step)"
-        if [[ -z "$sim_total" ]]; then
-            log ERROR "Paper-Trading-Schritt fehlgeschlagen."
-            maybe_start_dashboard
-            return 1
-        fi
-        log INFO "Paper-Saldo: $sim_total CHF"
+        append_history "$demo_total" "ALARM"
+        handle_alarm "$demo_total" "$demo_ath" "$demo_loss" "$demo_loss_pct"
 
-        local sim_status="OK"
-        if awk -v t="$sim_total" -v th="$THRESHOLD_CHF" 'BEGIN{exit !(t<th)}'; then
-            sim_status="ALARM (sim)"
-            log WARN "Paper-Depot unter Schwelle - aber Simulation: KEIN Mailversand."
-        fi
-
-        append_history "$sim_total" "$sim_status"
-        log INFO "=== DepotTracker SIMULATIONS-Lauf beendet ==="
+        log INFO "=== DepotTracker DEMO-Lauf beendet ==="
         maybe_start_dashboard
         return 0
     fi
 
     # ------------------------------------------------------------------
-    # 8) LIVE-PFAD: Original-Logik unveraendert
+    # 7) LIVE-PFAD: Original-Kernlogik UNVERAENDERT.
     # ------------------------------------------------------------------
     check_cpu_load
     sleep "$STEP_DELAY"   # System-Throttling zwischen Schritten.
