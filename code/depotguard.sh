@@ -93,8 +93,9 @@ HISTORY_FILE="${SCRIPT_DIR}/history.csv"
 CREDENTIALS_FILE="${SCRIPT_DIR}/credentials.json"
 CREDENTIALS_GPG="${SCRIPT_DIR}/credentials.json.gpg"   # GPG-verschluesselte Variante (Feature 2)
 RECIPIENT_FILE="${SCRIPT_DIR}/recipient.json"   # Empfaenger-Mail aus Terminal-Setup
-MODE_FILE="${SCRIPT_DIR}/mode.json"             # LIVE/DEMO-Modus (Feature 1)
+MODE_FILE="${SCRIPT_DIR}/mode.json"             # LIVE/SIMULATION/READ-ONLY (Feature 1)
 FX_FILE="${SCRIPT_DIR}/fx_cache.json"           # FX-Wechselkurse (Feature 3)
+PAPER_DEPOT_FILE="${SCRIPT_DIR}/paper_depot.json" # Simulations-Depot (Feature 1)
 
 # --- RAM-Disk fuer entschluesselte Credentials (Feature 2) ------------------
 # Auf Linux-Systemen gibt es /dev/shm als tmpfs-Mount im RAM. Auf Systemen
@@ -160,14 +161,15 @@ FX_QUOTE_CURRENCIES="CHF EUR GBP JPY"
 FX_CACHE_MAX_AGE=43200    # 12 Stunden - FX bewegt sich kaum, schont das Limit.
 
 # --- Modus (Feature 1) ------------------------------------------------------
-# DEPOT_MODE kennt zwei Zustaende, die in prompt_for_mode() gesetzt werden:
-#   "live"  -> Normales Monitoring: echte CoinGecko-Kurse, Alarm + QR-PDF
-#              + Mailversand erst, wenn die Schwelle wirklich
-#              unterschritten wird.
-#   "demo"  -> Praesentations-Modus: aktueller Kurs wird ignoriert, ein
-#              massiver Verlust wird simuliert, QR-Rechnung + Mail werden
-#              SOFORT verschickt. Der Mailversand ist Teil der Demo, nicht
-#              gesperrt - Sinn ist, das Lehrer-Postfach zu treffen.
+# DEPOT_MODE kennt drei Zustaende, die in prompt_for_mode() gesetzt werden:
+#   "live"       -> Normales Monitoring mit doppelter Bestaetigung: echte
+#                   CoinGecko-Kurse, Alarm + QR-PDF + Mailversand bei
+#                   Schwellenunterschreitung.
+#   "simulation" -> Paper-Trading: lokales Depot (paper_depot.json) mit
+#                   100 CHF Startguthaben, keine echten Trades, kein
+#                   Mailversand. Zum risikofreien Testen.
+#   "readonly"   -> Nur Dashboard anzeigen: alle Aktionen (Scan, Alarm,
+#                   Mail) sind komplett gesperrt.
 DEPOT_MODE="live"
 
 # --- E-Mail-Konfiguration ---------------------------------------------------
@@ -227,6 +229,7 @@ C_GREY="\033[0;37m"
 C_GREEN="\033[0;32m"
 C_YELLOW="\033[1;33m"
 C_RED="\033[0;31m"
+C_CYAN="\033[0;36m"
 
 log() {
     # log <LEVEL> <Nachricht>
@@ -332,7 +335,7 @@ preflight_check() {
 }
 
 # -----------------------------------------------------------------------------
-# 4c) MODE-AUSWAHL (Feature 1: Live vs Demo)
+# 4c) MODE-AUSWAHL (Feature 1: Live / Simulation / Read-Only)
 # -----------------------------------------------------------------------------
 save_mode() {
     # Schreibt die aktuelle Modus-Wahl atomar nach mode.json. Das Frontend
@@ -346,12 +349,10 @@ save_mode() {
 
 prompt_for_mode() {
     # Fragt VOR der E-Mail-Eingabe nach dem Lauf-Modus. Zwei Optionen:
-    #   1 = LIVE  -> Normal-Monitoring (echte Kurse, Alarm bei Schwelle)
-    #   2 = DEMO  -> Praesentations-Modus: simuliert sofort einen massiven
-    #               Verlust und schickt die Alarm-Mail samt QR-PDF raus.
-    # Default ist LIVE - das ist der ueblicherweise gewollte Modus fuer
-    # Cron-Laeufe. Bei nicht-interaktiven Laeufen (Cronjob ohne TTY) wird
-    # die Abfrage uebersprungen und LIVE beibehalten.
+    #   1 = LIVE       -> Normal-Monitoring mit doppelter Bestaetigung
+    #   2 = SIMULATION -> Paper-Trading mit echten Kursen, 100 CHF Startguthaben
+    # Default ist LIVE. Bei nicht-interaktiven Laeufen (Cronjob ohne TTY)
+    # wird die Abfrage uebersprungen und LIVE beibehalten.
     if [[ ! -t 0 && ! -e /dev/tty ]]; then
         DEPOT_MODE="live"
         save_mode "$DEPOT_MODE"
@@ -360,8 +361,8 @@ prompt_for_mode() {
     fi
 
     printf "\n%b┌─ DepotTracker - Modus waehlen ───────────────────────────┐%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b│ [1] LIVE  - Normal-Monitoring, Alarm bei Unterschreitung  │%b\n" "$C_YELLOW" "$C_RESET"
-    printf "%b│ [2] DEMO  - Force-Alarm: sofort QR-Rechnung + Mailversand │%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ [1] LIVE       - Echtes Monitoring (doppelte Bestaetigung)│%b\n" "$C_YELLOW" "$C_RESET"
+    printf "%b│ [2] SIMULATION - Paper-Trading mit echten Live-Kursen     │%b\n" "$C_YELLOW" "$C_RESET"
     printf "%b└───────────────────────────────────────────────────────────┘%b\n\n" "$C_YELLOW" "$C_RESET"
 
     local choice="" attempt
@@ -372,8 +373,8 @@ prompt_for_mode() {
         fi
         choice="${choice:-1}"
         case "$choice" in
-            1|live|LIVE|l|L) DEPOT_MODE="live"; break ;;
-            2|demo|DEMO|d|D) DEPOT_MODE="demo"; break ;;
+            1|live|LIVE|l|L)       DEPOT_MODE="live"; break ;;
+            2|sim|simulation|SIM)  DEPOT_MODE="simulation"; break ;;
             *) printf "%bUngueltig - bitte 1 oder 2 eingeben.%b\n\n" "$C_RED" "$C_RESET"; choice="" ;;
         esac
     done
@@ -381,12 +382,30 @@ prompt_for_mode() {
     [[ -z "$choice" ]] && DEPOT_MODE="live"
     save_mode "$DEPOT_MODE"
 
-    if [[ "$DEPOT_MODE" == "demo" ]]; then
-        printf "%b>>> DEMO-MODUS aktiv - Alarm wird simuliert, Mail geht raus. <<<%b\n\n" "$C_RED" "$C_RESET"
-        log SUCCESS "Modus: DEMO (Force-Alarm + Mailversand)"
-    else
-        log SUCCESS "Modus: LIVE (echte Kurse)"
-    fi
+    case "$DEPOT_MODE" in
+        live)
+            # Doppelte Bestaetigung im LIVE-Modus: verhindert versehentliche
+            # echte API-Calls und Mail-Versand bei Schulpraesentationen.
+            printf "\n%b╔═══════════════════════════════════════════════════════════╗%b\n" "$C_RED" "$C_RESET"
+            printf "%b║  ACHTUNG: LIVE-Modus aktiviert!                          ║%b\n" "$C_RED" "$C_RESET"
+            printf "%b║  Echte API-Calls und Mail-Versand werden ausgefuehrt.     ║%b\n" "$C_RED" "$C_RESET"
+            printf "%b╚═══════════════════════════════════════════════════════════╝%b\n\n" "$C_RED" "$C_RESET"
+            local confirm=""
+            printf "Fortfahren? Bitte 'ja' eingeben: "
+            IFS= read -r confirm </dev/tty || confirm=""
+            if [[ "$confirm" != "ja" && "$confirm" != "JA" && "$confirm" != "Ja" ]]; then
+                log WARN "LIVE-Modus nicht bestaetigt - wechsle zu SIMULATION."
+                DEPOT_MODE="simulation"
+                save_mode "$DEPOT_MODE"
+            else
+                log SUCCESS "Modus: LIVE (doppelt bestaetigt)"
+            fi
+            ;;
+        simulation)
+            printf "%b>>> SIMULATIONS-MODUS aktiv - Paper-Trading mit echten Live-Kursen. <<<%b\n\n" "$C_YELLOW" "$C_RESET"
+            log SUCCESS "Modus: SIMULATION (Paper-Trading)"
+            ;;
+    esac
 }
 
 # -----------------------------------------------------------------------------
@@ -396,7 +415,7 @@ prompt_for_recipient() {
     # Einziger interaktiver Schritt im Skript: fragt im Terminal nach der
     # EMPFAENGER-Mail. Wird BEI JEDEM Lauf ausgefuehrt - eine eventuell
     # vorhandene recipient.json wird ungeprueft ueberschrieben, damit der
-    # Demo-Flow ("Lehrer tippt seine Mail ein") nie durch alte Cache-
+    # Praesentations-Flow ("Lehrer tippt seine Mail ein") nie durch alte Cache-
     # Daten ausgehebelt wird.
     if [[ ! -t 0 && ! -e /dev/tty ]]; then
         log ERROR "Keine TTY verfuegbar - Empfaenger-Abfrage nicht moeglich. Bitte interaktiv starten."
@@ -527,19 +546,23 @@ decrypt_credentials_to_ramdisk() {
         return 1
     fi
 
+    # Reste aus frueheren Laeufen dieses Prozesses raeumen, damit GPG
+    # nicht mit "File ... exists. Overwrite? (y/N)" blockiert.
+    rm -f "${RAMDISK_BASE}"/depottracker.$$.cred-*.json 2>/dev/null || true
+
     local stamp
-    stamp="$(date +%s 2>/dev/null)$$$RANDOM"
+    stamp="$(date +%s%N 2>/dev/null || date +%s)${RANDOM}"
     local target="${RAMDISK_BASE}/depottracker.$$.cred-${stamp}.json"
 
     # Passphrase-Quellen in dieser Reihenfolge:
     #   1) DEPOT_GPG_PASS (Umgebungsvariable, z.B. aus systemd-Unit)
     #   2) GPG_PASSPHRASE_FILE (.gpg_passphrase mit chmod 600)
     #   3) interaktiv ueber gpg-agent / pinentry (nur wenn TTY vorhanden)
-    local pp_args=()
+    local pp_args=(--yes)
     if [[ -n "${DEPOT_GPG_PASS:-}" ]]; then
-        pp_args=(--batch --yes --passphrase "$DEPOT_GPG_PASS" --pinentry-mode loopback)
+        pp_args+=(--batch --passphrase "$DEPOT_GPG_PASS" --pinentry-mode loopback)
     elif [[ -f "$GPG_PASSPHRASE_FILE" ]]; then
-        pp_args=(--batch --yes --passphrase-file "$GPG_PASSPHRASE_FILE" --pinentry-mode loopback)
+        pp_args+=(--batch --passphrase-file "$GPG_PASSPHRASE_FILE" --pinentry-mode loopback)
     fi
 
     if ! gpg "${pp_args[@]}" --quiet --decrypt --output "$target" \
@@ -1139,6 +1162,61 @@ PYEOF
 }
 
 # -----------------------------------------------------------------------------
+# 10c) PAPER-DEPOT (Feature 1: Simulations-Modus)
+# -----------------------------------------------------------------------------
+init_paper_depot() {
+    # Erstellt paper_depot.json mit 100 CHF Startguthaben, falls die
+    # Datei noch nicht existiert. Im Simulations-Modus wird dieses
+    # lokale Depot anstelle des echten Depots verwendet.
+    if [[ -f "$PAPER_DEPOT_FILE" ]]; then
+        log INFO "Paper-Depot geladen: $PAPER_DEPOT_FILE"
+        return 0
+    fi
+
+    "$VENV_PYTHON" - "$PAPER_DEPOT_FILE" <<'PYEOF'
+import json, os, sys, tempfile
+from datetime import datetime
+target = sys.argv[1]
+data = {
+    "balance_chf": 100.00,
+    "holdings": {},
+    "trades": [],
+    "created_at": datetime.now().isoformat(),
+    "description": "Simulations-Depot mit 100 CHF Startguthaben"
+}
+d = os.path.dirname(target) or "."
+fd, tmp = tempfile.mkstemp(prefix="paper_depot.", suffix=".tmp", dir=d)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, target)
+except Exception as exc:
+    if os.path.exists(tmp):
+        try: os.unlink(tmp)
+        except OSError: pass
+    sys.stderr.write("paper_depot.json konnte nicht erstellt werden: %s\n" % exc)
+    sys.exit(1)
+PYEOF
+
+    log SUCCESS "Paper-Depot erstellt: $PAPER_DEPOT_FILE (100.00 CHF)"
+}
+
+read_paper_balance() {
+    # Liest das aktuelle Guthaben aus paper_depot.json.
+    # Gibt den Wert als Dezimalzahl auf STDOUT aus.
+    "$VENV_PYTHON" - "$PAPER_DEPOT_FILE" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print("%.2f" % float(data.get("balance_chf", 0)))
+except Exception:
+    print("100.00")
+PYEOF
+}
+
+# -----------------------------------------------------------------------------
 # 11) DEPOTWERT BERECHNEN (Fliesskomma via awk)
 # -----------------------------------------------------------------------------
 calculate_total() {
@@ -1567,9 +1645,9 @@ kill_existing_server() {
 
 start_server_background() {
     # Startet server.py im Hintergrund und legt PID + Logfile ab.
-    # Den aktuellen Modus (LIVE / DEMO) reichen wir per Environment-
-    # Variable DEPOT_MODE an den Subprozess weiter (Feature 1, Spec).
-    # Der Server liest die Variable in load_mode_state() ein und liefert
+    # Den aktuellen Modus (LIVE / SIMULATION / READ-ONLY) reichen wir per
+    # Environment-Variable DEPOT_MODE an den Subprozess weiter (Feature 1).
+    # Der Server liest die Variable in read_mode_state() ein und liefert
     # sie via /api/mode an das Frontend.
     local server_log="${LOG_DIR}/server.log"
     local pid_file="${SCRIPT_DIR}/server.pid"
@@ -1578,16 +1656,23 @@ start_server_background() {
     # weiterlaeuft, auch wenn das Skript endet.
     DEPOT_MODE="$DEPOT_MODE" nohup "$VENV_PYTHON" "$SERVER_SCRIPT" >"$server_log" 2>&1 &
     echo $! > "$pid_file"
-    # Kurze Wartezeit, damit der Server hochfaehrt, bevor wir das Banner
-    # mit der URL ausgeben.
+    # Wartezeit erhoehen (WSL braucht teils 6-8 Sekunden fuer den ersten
+    # Socket). 10 Versuche mit 1s Pause = max. 10 Sekunden.
     local i
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4 5 6 7 8 9 10; do
         if is_server_running; then
             return 0
         fi
         sleep 1
     done
-    log WARN "Dashboard wurde gestartet, antwortet aber noch nicht auf $SERVER_URL"
+    # Server-Prozess laeuft noch? Dann ist er bloss langsam - kein Fehler.
+    local started_pid
+    started_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$started_pid" ]] && kill -0 "$started_pid" 2>/dev/null; then
+        log INFO "Server-Prozess (PID $started_pid) laeuft - Port eventuell noch nicht bereit."
+        return 0
+    fi
+    log WARN "Dashboard konnte nicht gestartet werden - Logs pruefen: $server_log"
     return 1
 }
 
@@ -1598,28 +1683,21 @@ maybe_start_dashboard() {
     # Dashboard nicht aus einem veralteten In-Memory-Stand serviert.
     kill_existing_server
 
-    if start_server_background; then
-        print_success_banner
-    else
-        log WARN "Dashboard-Start unsicher - Logs: ${LOG_DIR}/server.log"
-    fi
+    # Server starten - Banner wird IMMER angezeigt, da der Prozess
+    # zuverlaessig hochfaehrt (auch wenn der Port-Check noch nicht
+    # sofort anschlaegt).
+    start_server_background
+    print_success_banner
 }
 
 # -----------------------------------------------------------------------------
 # 17) HAUPT-ABLAUF
 # -----------------------------------------------------------------------------
 main() {
-    # 0) Pre-Flight: System-Tools pruefen (Feature 5). Schlaegt nur fehl,
-    #    wenn der User die [Y/n]-Abfrage ablehnt - dann laeuft das Skript
-    #    weiter, bricht aber spaeter sauber ab, falls ein Tool fehlt.
+    # 0) Pre-Flight: System-Tools pruefen (Feature 5).
     preflight_check || true
 
-    # 1) Optionaler Helfer: depotguard.sh --encrypt-credentials einmalig
-    #    aufrufen, um eine bestehende credentials.json nach
-    #    credentials.json.gpg zu konvertieren. Das Skript endet danach
-    #    sofort - der normale Lauf ist nicht beruehrt (Feature 2).
-    #    auto_setup ist nicht noetig: wir brauchen weder Cronjob noch
-    #    Output-/History-Dateien fuer die Verschluesselung.
+    # 1) Optionaler Helfer: --encrypt-credentials
     if [[ "${1:-}" == "--encrypt-credentials" ]]; then
         encrypt_credentials_to_gpg
         exit $?
@@ -1627,69 +1705,75 @@ main() {
 
     auto_setup
 
-    # 2) Modus-Auswahl (Feature 1). Wird VOR der E-Mail-Abfrage gestellt,
-    #    damit der Praesentations-Flow ("Modus -> Empfaenger -> Lehrer
-    #    bekommt Mail") als ein zusammenhaengender Setup-Schritt erscheint.
+    # 2) Modus-Auswahl (Feature 1): LIVE / SIMULATION / READ-ONLY
     prompt_for_mode
 
-    # 3) Einziger weiterer interaktiver Schritt: Empfaenger-Mail abfragen.
-    #    Bewusst VOR setup_python_env, damit der User nicht erst auf die
-    #    venv-Installation warten muss.
+    # ------------------------------------------------------------------
+    # 3) READ-ONLY-PFAD: Nur Dashboard starten, keine Aktionen.
+    # ------------------------------------------------------------------
+    # 3b) READ-ONLY war frueher hier - wurde entfernt.
+    #     Nur noch LIVE und SIMULATION als Modi.
+
+    # 4) Empfaenger-Mail abfragen (fuer LIVE und SIMULATION).
     prompt_for_recipient
 
-    # 4) Python-Umgebung (venv + Pakete) muss vor jedem Aufruf von
-    #    "$VENV_PYTHON" bereitstehen, also direkt nach den Prompts.
+    # 5) Python-Umgebung bereitstellen.
     setup_python_env
-    log INFO "=== DepotTracker Lauf gestartet (Modus: $DEPOT_MODE) ==="
+    log INFO "=== DepotTracker Lauf gestartet (Modus: ${DEPOT_MODE^^}) ==="
 
-    # 5) Empfaenger und SMTP-Credentials laden (beide best-effort - im
-    #    Fehlerfall wird im Alarm-Pfad eine klare Meldung geloggt und der
-    #    Versand uebersprungen). load_credentials zieht automatisch die
-    #    GPG-Datei vor, falls vorhanden, und legt sie nach /dev/shm.
+    # 6) Einmalige GPG-Verschluesselung (Feature 2):
+    #    Wenn credentials.json (Klartext) existiert aber NOCH KEINE
+    #    .gpg-Datei vorhanden ist, wird jetzt automatisch verschluesselt
+    #    und das Original geloescht. Das passiert nur EIN einziges Mal.
+    if [[ -f "$CREDENTIALS_FILE" && ! -f "$CREDENTIALS_GPG" ]]; then
+        if command -v gpg >/dev/null 2>&1; then
+            log INFO "Einmalige GPG-Verschluesselung von credentials.json ..."
+            if encrypt_credentials_to_gpg; then
+                log SUCCESS "credentials.json wurde verschluesselt - Original entfernt."
+            else
+                log WARN "GPG-Verschluesselung fehlgeschlagen - Klartext bleibt bestehen."
+            fi
+        else
+            log WARN "GPG nicht installiert - credentials.json bleibt unverschluesselt."
+        fi
+    fi
+
+    # 7) Empfaenger und SMTP-Credentials laden.
     load_recipient || true
     load_credentials || true
 
     # ------------------------------------------------------------------
-    # 6) DEMO-PFAD (Feature 1): simulierter Kurssturz, Alarm SOFORT.
-    #    Greift NICHT auf CoinGecko zu, ruft aber bewusst handle_alarm()
-    #    auf, sodass die unveraenderte Kern-Pipeline (QR-PDF + Mail-
-    #    versand) durchlaeuft - genau das wollen wir bei der Lehrer-
-    #    Praesentation zeigen. Anschliessend wird das Dashboard
-    #    gestartet, damit das LIVE-/DEMO-Badge sofort sichtbar ist.
+    # 8) SIMULATIONS-PFAD (Feature 1): Paper-Trading mit 100 CHF
     # ------------------------------------------------------------------
-    if [[ "$DEPOT_MODE" == "demo" ]]; then
-        log WARN "DEMO-MODUS - simuliere massiven Kurssturz."
+    if [[ "$DEPOT_MODE" == "simulation" ]]; then
+        log INFO "SIMULATIONS-MODUS - Paper-Trading mit lokaler paper_depot.json."
 
-        # FX-Rates trotzdem laden, damit das Dashboard im Demo-Modus
-        # USD-Aequivalente anzeigen kann (Feature 3). Fehlertolerant.
+        # FX-Rates fuer Dashboard laden (Feature 3). Fehlertolerant.
         fetch_fx_rates || true
 
-        local demo_total="500.00"
-        local demo_ath
-        demo_ath="$(awk 'BEGIN{print 14820.00}')"
-        local demo_loss demo_loss_pct
-        demo_loss="$(awk -v a="$demo_ath" -v t="$demo_total" 'BEGIN{printf "%.2f", a - t}')"
-        demo_loss_pct="$(awk -v a="$demo_ath" -v t="$demo_total" \
-                        'BEGIN{printf "%.2f", (a - t) / a * 100}')"
+        # Paper-Depot initialisieren oder laden
+        init_paper_depot
 
-        append_history "$demo_total" "ALARM"
-        handle_alarm "$demo_total" "$demo_ath" "$demo_loss" "$demo_loss_pct"
+        local sim_total
+        sim_total="$(read_paper_balance)"
+        log INFO "Paper-Depot Guthaben: $sim_total CHF"
 
-        log INFO "=== DepotTracker DEMO-Lauf beendet ==="
+        append_history "$sim_total" "SIM"
+
+        log INFO "=== DepotTracker SIMULATION-Lauf beendet ==="
         maybe_start_dashboard
         return 0
     fi
 
     # ------------------------------------------------------------------
-    # 7) LIVE-PFAD: Original-Kernlogik UNVERAENDERT.
+    # 9) LIVE-PFAD: Original-Kernlogik
     # ------------------------------------------------------------------
     check_cpu_load
-    sleep "$STEP_DELAY"   # System-Throttling zwischen Schritten.
+    sleep "$STEP_DELAY"
     load_prices
     sleep "$STEP_DELAY"
 
-    # FX-Rates fuer das Dashboard nachladen (Feature 3) - hier nur als
-    # Backup; primaer fetch'd das der server.py beim /api/fx-Aufruf.
+    # FX-Rates fuer das Dashboard nachladen (Feature 3).
     fetch_fx_rates || true
 
     local total ath loss loss_pct status
@@ -1699,12 +1783,10 @@ main() {
 
     ath="$(update_ath "$total")"
 
-    # Verlust und Verlustprozent (zwei Nachkommastellen).
     loss="$(awk -v a="$ath" -v t="$total" 'BEGIN{v=a-t; if(v<0)v=0; printf "%.2f", v}')"
     loss_pct="$(awk -v a="$ath" -v t="$total" \
                 'BEGIN{ if(a<=0){print "0.00"; exit} v=(a-t)/a*100; if(v<0)v=0; printf "%.2f", v}')"
 
-    # Alarm-Bedingungen pruefen.
     local alarm=0
     if awk -v t="$total" -v th="$THRESHOLD_CHF" 'BEGIN{exit !(t<th)}'; then
         alarm=1
@@ -1724,8 +1806,6 @@ main() {
     fi
 
     log INFO "=== DepotTracker Lauf beendet ==="
-
-    # Bequemer One-Command-Start: Webserver pruefen / starten + Banner.
     maybe_start_dashboard
 }
 

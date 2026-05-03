@@ -2,7 +2,9 @@
    DepotTracker - script.js
    --------------------------------------------------------------------------
    Steuert das Dashboard: Modal, Counter-Animationen, Status-Indikator,
-   Chart, Tabelle "Letzte Laeufe", Fortschrittsbalken und Scan-Button.
+   Chart, Tabelle "Letzte Laeufe", Fortschrittsbalken, Scan-Button,
+   Modus-Badges (LIVE/SIMULATION/READ-ONLY), Waehrungs-Umschalter
+   (Feature 3) und Read-Only-Sperrung.
    Saemtliche Texte und Kommentare in Schweizer Schreibweise (ss, kein Eszett).
    ========================================================================= */
 
@@ -12,44 +14,37 @@
     /* ---------------------------------------------------------------------
        1) UTILS
        --------------------------------------------------------------------- */
-
-    /**
-     * Validiert eine E-Mail-Adresse mit einer einfachen Regex.
-     * Strenge Pruefung erfolgt zusaetzlich serverseitig in save_email.php.
-     */
     const isValidEmail = (value) =>
         /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(value).trim());
 
-    /**
-     * Formatiert eine Zahl als CHF-Wert mit Schweizer Schreibweise
-     * (Tausender-Apostroph, zwei Nachkommastellen).
-     */
-    const formatCHF = (value) =>
+    const formatNumber = (value, decimals = 2) =>
         Number(value).toLocaleString("de-CH", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
+            minimumFractionDigits: decimals,
+            maximumFractionDigits: decimals,
         });
 
-    /**
-     * Hilfsfunktion: Wartezeit als Promise (fuer await sleep(...)).
-     */
+    const formatCHF = (value) => formatNumber(value, 2);
+
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
     /* ---------------------------------------------------------------------
-       2) TOAST-NOTIFICATIONS
+       2) GLOBALER STATE
+       --------------------------------------------------------------------- */
+    let currentCurrency = "CHF";
+    let fxRates = {};           // z.B. { CHF: 0.78, EUR: 0.85, GBP: 0.74 }
+    let currentMode = null;     // "live" | "simulation" | "readonly"
+
+    /* ---------------------------------------------------------------------
+       3) TOAST-NOTIFICATIONS
        --------------------------------------------------------------------- */
     const toastContainer = document.getElementById("toast-container");
 
     function showToast(message, type = "success", duration = 3500) {
-        // Erstellt einen kurzlebigen Hinweis oben rechts.
         const toast = document.createElement("div");
         toast.className = `toast toast-${type}`;
         toast.textContent = message;
         toastContainer.appendChild(toast);
-
-        // Animation in zwei Frames anstossen, damit die CSS-Transition greift.
         requestAnimationFrame(() => toast.classList.add("show"));
-
         setTimeout(() => {
             toast.classList.remove("show");
             setTimeout(() => toast.remove(), 320);
@@ -57,12 +52,7 @@
     }
 
     /* ---------------------------------------------------------------------
-       3) MODAL: EMPFAENGER-MAIL HINTERLEGEN (ein einziger Schritt)
-          Absender-Daten (depottracker@gmail.com + App-Passwort) sind fest
-          im Backend hinterlegt - das UI fragt sie bewusst nicht mehr ab.
-          Die Empfaenger-Mail wird normalerweise schon vom Terminal-Setup
-          in depotguard.sh in recipient.json gespeichert; das Modal dient
-          hier nur noch als Fallback, falls der User sie aendern moechte.
+       4) MODAL: EMPFAENGER-MAIL HINTERLEGEN
        --------------------------------------------------------------------- */
     const modal       = document.getElementById("email-modal");
     const emailForm   = document.getElementById("email-form");
@@ -73,8 +63,6 @@
     const STORAGE_KEY = "depottracker.email";
 
     function openModal(prefill) {
-        // Beim erneuten Oeffnen ("E-Mail aendern") gespeicherte Adresse
-        // vorbefuellen - bevorzugt den Wert aus recipient.json.
         const saved = prefill || localStorage.getItem(STORAGE_KEY) || "";
         if (saved) emailInput.value = saved;
         emailError.hidden = true;
@@ -88,9 +76,6 @@
         modal.setAttribute("aria-hidden", "true");
     }
 
-    // Beim ersten Besuch: pruefen, ob recipient.json bereits eine Adresse
-    // enthaelt (vom Terminal-Setup). Falls ja -> Modal NICHT oeffnen, der
-    // Lehrer-Flow ist nahtlos. Falls nein -> Modal als Fallback zeigen.
     async function maybeOpenModal() {
         try {
             const res = await fetch("/api/recipient", { cache: "no-store" });
@@ -98,23 +83,20 @@
                 const data = await res.json();
                 if (data && data.email) {
                     localStorage.setItem(STORAGE_KEY, data.email);
-                    return; // alles gut, Modal bleibt zu
+                    return;
                 }
             }
         } catch (err) {
             console.warn("/api/recipient nicht erreichbar:", err);
         }
-        // Fallback: kein Server-Eintrag -> lokalen Cache pruefen.
         if (!localStorage.getItem(STORAGE_KEY)) {
             openModal();
         }
     }
 
-    // ---------- Empfaenger-Adresse speichern --------------------------------
     emailForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const value = emailInput.value.trim();
-
         if (!isValidEmail(value)) {
             emailError.hidden = false;
             emailInput.focus();
@@ -130,54 +112,42 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ email: value }),
             });
-
             const ct = res.headers.get("content-type") || "";
             const data = ct.includes("application/json")
                 ? await res.json()
                 : { success: res.ok };
-
             if (!res.ok || !data.success) {
                 throw new Error(data.error || "Server-Fehler");
             }
-
             localStorage.setItem(STORAGE_KEY, value);
             closeModal();
-            showToast("Empfänger gespeichert.", "success");
+            showToast("Empfaenger gespeichert.", "success");
         } catch (err) {
             console.warn("/save_email nicht erreichbar:", err);
-            // Lokal speichern als Fallback, damit der Demo-Button trotzdem
-            // einen Wert hat - der echte Versand wird aber nur klappen,
-            // wenn recipient.json serverseitig vorhanden ist.
             localStorage.setItem(STORAGE_KEY, value);
             closeModal();
-            showToast("Empfänger lokal gespeichert (Server offline).", "error");
+            showToast("Empfaenger lokal gespeichert (Server offline).", "error");
         } finally {
             emailSubmit.disabled = false;
             emailSubmit.textContent = "Speichern";
         }
     });
 
-    // "E-Mail aendern"-Button im Footer: oeffnet das Modal erneut.
     const changeEmailBtn = document.getElementById("change-email-btn");
     if (changeEmailBtn) {
         changeEmailBtn.addEventListener("click", () => openModal());
     }
 
     /* ---------------------------------------------------------------------
-       3b) MODUS-BADGE (Feature 1) + GPG-Indikator (Feature 2)
-           Pollt /api/mode und schaltet das Header-Badge zwischen LIVE
-           (gruen) und DEMO (blau) um. Der Modus kommt aus der Env-Var
-           DEPOT_MODE (von depotguard.sh beim Server-Start gesetzt) oder
-           als Fallback aus mode.json. Der GPG-Indikator wird sichtbar,
-           sobald das Backend meldet, dass credentials.json.gpg vorhanden
-           ist (Feature 2).
+       5) MODUS-BADGE (Feature 1): LIVE / SIMULATION
+          + GPG-Indikator (Feature 2)
        --------------------------------------------------------------------- */
     const modeBadge = document.getElementById("mode-badge");
     const modeLabel = document.getElementById("mode-label");
     const encBadge  = document.getElementById("enc-badge");
-    const VALID_MODES = ["live", "demo"];
-    const MODE_LABELS = { "live": "LIVE", "demo": "DEMO" };
-    let lastMode = null;
+    const demoEmailSection = document.getElementById("demo-email-section");
+    const VALID_MODES = ["live", "simulation"];
+    const MODE_LABELS = { "live": "LIVE", "simulation": "SIMULATION" };
 
     async function refreshMode() {
         try {
@@ -187,42 +157,60 @@
             const raw = (data && data.mode) || "live";
             const mode = VALID_MODES.includes(raw) ? raw : "live";
 
-            if (mode !== lastMode) {
-                modeBadge.classList.remove("mode-live", "mode-demo");
-                modeBadge.classList.add(mode === "demo" ? "mode-demo" : "mode-live");
+            if (mode !== currentMode) {
+                modeBadge.classList.remove("mode-live", "mode-simulation");
+                modeBadge.classList.add("mode-" + mode);
                 modeLabel.textContent = MODE_LABELS[mode];
-                if (lastMode !== null) {
-                    showToast(
-                        "Modus gewechselt: " + MODE_LABELS[mode],
-                        mode === "demo" ? "error" : "success"
-                    );
+
+                // Test-Mail-Button nur in SIMULATION sichtbar
+                if (demoEmailSection) {
+                    demoEmailSection.hidden = (mode !== "simulation");
                 }
-                lastMode = mode;
+
+                if (currentMode !== null) {
+                    showToast("Modus gewechselt: " + MODE_LABELS[mode], "success");
+                }
+                currentMode = mode;
             }
 
             if (encBadge) {
                 encBadge.hidden = !data.credentials_encrypted;
             }
         } catch (err) {
-            // Bewusst still: Server kann zwischen Restarts kurz weg sein.
+            // Stille Toleranz
         }
     }
 
     /* ---------------------------------------------------------------------
-       3c) FX-ANZEIGE (Feature 3): USD/CHF-Live-Umrechnung
-           Liest /api/fx (server.py holt die Kurse selbst) und zeigt das
-           USD-Aequivalent des aktuellen CHF-Depotwerts unter der ersten
-           Karte. open.er-api.com nutzt USD als Basis; rates.CHF ist also
-           "wieviel CHF kostet 1 USD". Umrechnung: usd = chf / rates.CHF.
+       6) WAEHRUNGS-UMSCHALTER (Feature 3: Multi-Currency)
+          Liest /api/fx und rechnet alle CHF-Werte dynamisch um.
+          Basis-Waehrung der FX-API ist USD. rates.CHF = "wieviel CHF
+          kostet 1 USD". Umrechnung: targetValue = chfValue / rates.CHF * rates.TARGET
        --------------------------------------------------------------------- */
-    const cardFx     = document.getElementById("card-fx-current");
-    const fxUsdSpan  = document.getElementById("fx-usd");
 
-    function chfToUsd(fxData, chfValue) {
-        const rates = (fxData && fxData.rates) || {};
-        const chfPerUsd = rates.CHF;
-        if (!chfPerUsd || chfPerUsd <= 0) return null;
-        return chfValue / chfPerUsd;
+    function convertFromCHF(chfValue, targetCurrency) {
+        if (targetCurrency === "CHF") return chfValue;
+        const chfPerUsd = fxRates.CHF;
+        const targetPerUsd = fxRates[targetCurrency];
+        if (!chfPerUsd || chfPerUsd <= 0 || !targetPerUsd) return null;
+        return (chfValue / chfPerUsd) * targetPerUsd;
+    }
+
+    function updateAllValues() {
+        // Aktualisiere alle Karten-Werte mit der gewaehlten Waehrung
+        document.querySelectorAll("[data-base-chf]").forEach((el) => {
+            const baseCHF = parseFloat(el.dataset.baseChf);
+            if (!Number.isFinite(baseCHF)) return;
+            const converted = convertFromCHF(baseCHF, currentCurrency);
+            if (converted === null) return;
+            el.textContent = formatNumber(converted) + " " + currentCurrency;
+            el.dataset.target = converted.toFixed(2);
+            el.dataset.suffix = " " + currentCurrency;
+        });
+
+        // Tabellen-Header aktualisieren
+        const tableCurrencyEl = document.getElementById("table-currency");
+        if (tableCurrencyEl) tableCurrencyEl.textContent = currentCurrency;
     }
 
     async function refreshFx() {
@@ -230,25 +218,38 @@
             const res = await fetch("/api/fx", { cache: "no-store" });
             if (!res.ok) return;
             const data = await res.json();
-            // Aktueller CHF-Wert aus dem data-target der Hauptkarte.
-            const currentEl = document.querySelector(".card-accent [data-counter]");
-            const chf = currentEl ? parseFloat(currentEl.dataset.target) : NaN;
-            if (!Number.isFinite(chf)) { cardFx.hidden = true; return; }
-
-            const usd = chfToUsd(data, chf);
-            if (usd === null) { cardFx.hidden = true; return; }
-
-            fxUsdSpan.textContent = usd.toLocaleString("de-CH", {
-                minimumFractionDigits: 2, maximumFractionDigits: 2,
-            });
-            cardFx.hidden = false;
+            if (data && data.rates) {
+                fxRates = data.rates;
+                // USD ist die Basiswaehrung der API (= 1.0) und fehlt
+                // deshalb im rates-Objekt. Explizit setzen.
+                fxRates.USD = 1;
+                if (!fxRates.CHF) fxRates.CHF = 1;
+                updateAllValues();
+            }
         } catch (err) {
-            // Stille Toleranz - FX ist eine Zusatzanzeige, kein Pflichtfeature.
+            // Stille Toleranz - FX ist eine Zusatzanzeige
         }
     }
 
+    // Currency-Chips Event-Listener
+    document.querySelectorAll(".chip[data-currency]").forEach((chip) => {
+        chip.addEventListener("click", () => {
+            document.querySelectorAll(".chip[data-currency]")
+                .forEach((c) => c.classList.remove("chip-active"));
+            chip.classList.add("chip-active");
+            currentCurrency = chip.dataset.currency;
+            updateAllValues();
+            // Tabelle und Chart mit neuer Waehrung neu rendern
+            renderRunsTable();
+            if (chart) {
+                const active = document.querySelector(".chip[data-range].chip-active");
+                if (active) buildChart(parseInt(active.dataset.range, 10));
+            }
+        });
+    });
+
     /* ---------------------------------------------------------------------
-       4) COUNTER-ANIMATIONEN (Karten zaehlen beim Laden hoch)
+       7) COUNTER-ANIMATIONEN
        --------------------------------------------------------------------- */
     function animateCounter(el) {
         const target = parseFloat(el.dataset.target);
@@ -259,14 +260,10 @@
 
         function step(now) {
             const t = Math.min(1, (now - start) / duration);
-            // Ease-Out-Quad fuer ein angenehmes Verlangsamen am Ende.
             const eased = 1 - (1 - t) * (1 - t);
             const value = target * eased;
             const formatted = decimals === 2
-                ? value.toLocaleString("de-CH", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                  })
+                ? formatNumber(value)
                 : Math.round(value).toLocaleString("de-CH");
             el.textContent = formatted + suffix;
             if (t < 1) requestAnimationFrame(step);
@@ -277,40 +274,36 @@
     document.querySelectorAll("[data-counter]").forEach(animateCounter);
 
     /* ---------------------------------------------------------------------
-       5) UHRZEIT IM HEADER
+       8) UHRZEIT IM HEADER
        --------------------------------------------------------------------- */
     const headerTime = document.getElementById("header-time");
     function tickClock() {
         const now = new Date();
         headerTime.textContent = now.toLocaleTimeString("de-CH", {
-            hour:   "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
+            hour: "2-digit", minute: "2-digit", second: "2-digit",
         });
     }
     tickClock();
     setInterval(tickClock, 1000);
 
     /* ---------------------------------------------------------------------
-       6) STATUS-INDIKATOR (alle 15s zwischen OK/ALARM wechseln zur Demo)
+       9) STATUS-INDIKATOR
        --------------------------------------------------------------------- */
     const statusDot   = document.getElementById("status-dot");
     const statusLabel = document.getElementById("status-label");
 
     function setStatus(ok) {
-        statusDot.classList.toggle("status-ok",    ok);
+        statusDot.classList.toggle("status-ok", ok);
         statusDot.classList.toggle("status-alarm", !ok);
         statusLabel.textContent = ok ? "System OK" : "Alarm aktiv";
     }
     setStatus(true);
-    // Demo-Wechsel: alle 30 Sekunden, damit beide Zustaende sichtbar sind.
     setInterval(() => setStatus(Math.random() > 0.25), 30_000);
 
     /* ---------------------------------------------------------------------
-       7) HISTORIEN-DATEN (simuliert; entspricht spaeter history.csv)
+       10) HISTORIEN-DATEN (simuliert)
        --------------------------------------------------------------------- */
     function generateHistory(days) {
-        // Simuliert Datenpunkte: Random-Walk um einen Trend.
         const data = [];
         const labels = [];
         let value = 12000 + Math.random() * 2000;
@@ -318,7 +311,6 @@
         for (let i = days - 1; i >= 0; i--) {
             const d = new Date(now);
             d.setDate(now.getDate() - i);
-            // Random-Walk + leichter Aufwaertstrend.
             value += (Math.random() - 0.45) * 350;
             value = Math.max(8000, value);
             data.push(Number(value.toFixed(2)));
@@ -330,15 +322,19 @@
     }
 
     /* ---------------------------------------------------------------------
-       8) CHART (Chart.js)
+       11) CHART (Chart.js)
        --------------------------------------------------------------------- */
     let chart;
 
     function buildChart(range) {
-        const { labels, data } = generateHistory(range);
-        const ctx = document.getElementById("history-chart").getContext("2d");
+        const { labels, data: rawData } = generateHistory(range);
+        // Daten in aktive Waehrung umrechnen
+        const data = rawData.map((v) => {
+            const c = convertFromCHF(v, currentCurrency);
+            return c !== null ? Number(c.toFixed(2)) : v;
+        });
 
-        // Verlauf als sanfter Farbverlauf unterhalb der Linie.
+        const ctx = document.getElementById("history-chart").getContext("2d");
         const gradient = ctx.createLinearGradient(0, 0, 0, 320);
         gradient.addColorStop(0, "rgba(79,140,255,0.45)");
         gradient.addColorStop(1, "rgba(79,140,255,0.00)");
@@ -350,7 +346,7 @@
             data: {
                 labels,
                 datasets: [{
-                    label: "Depotwert (CHF)",
+                    label: "Depotwert (" + currentCurrency + ")",
                     data,
                     borderColor: "#79b3ff",
                     backgroundColor: gradient,
@@ -375,7 +371,7 @@
                         bodyColor: "#cdd5e3",
                         padding: 12,
                         callbacks: {
-                            label: (ctx) => ` ${formatCHF(ctx.parsed.y)} CHF`,
+                            label: (ctx) => ` ${formatNumber(ctx.parsed.y)} ${currentCurrency}`,
                         },
                     },
                 },
@@ -388,7 +384,7 @@
                         grid: { color: "rgba(255,255,255,0.04)" },
                         ticks: {
                             color: "#7e8aa3",
-                            callback: (v) => formatCHF(v),
+                            callback: (v) => formatNumber(v),
                         },
                     },
                 },
@@ -396,7 +392,6 @@
         });
     }
 
-    // Chart wird erst initialisiert, wenn Chart.js geladen ist (defer).
     window.addEventListener("DOMContentLoaded", () => {
         if (typeof Chart === "undefined") {
             console.warn("Chart.js nicht verfuegbar - Diagramm wird uebersprungen.");
@@ -407,19 +402,14 @@
         maybeOpenModal();
         refreshMode();
         refreshFx();
-        // Modus + FX periodisch nachladen, ohne den Server zu fluten:
-        // Modus alle 5s (Reaktion soll fix sein, wenn der Lehrer mode
-        // wechselt), FX alle 5min (open.er-api hat keine harten Limits,
-        // wir bleiben aber fair).
         setInterval(refreshMode, 5_000);
-        setInterval(refreshFx,   300_000);
+        setInterval(refreshFx, 300_000);
     });
 
-    // Zeitraum-Chips umschalten (7T / 30T / 90T).
+    // Zeitraum-Chips
     document.querySelectorAll(".chip[data-range]").forEach((chip) => {
         chip.addEventListener("click", () => {
-            document
-                .querySelectorAll(".chip[data-range]")
+            document.querySelectorAll(".chip[data-range]")
                 .forEach((c) => c.classList.remove("chip-active"));
             chip.classList.add("chip-active");
             buildChart(parseInt(chip.dataset.range, 10));
@@ -427,28 +417,28 @@
     });
 
     /* ---------------------------------------------------------------------
-       9) TABELLE "LETZTE LAEUFE"
+       12) TABELLE "LETZTE LAEUFE"
        --------------------------------------------------------------------- */
     function renderRunsTable() {
         const body = document.getElementById("runs-body");
         const { labels, data } = generateHistory(8);
 
-        // Tabellenzeilen in umgekehrter Reihenfolge (neueste oben).
         const rows = labels.map((lbl, i) => ({
             label: lbl,
             value: data[i],
-            prev:  i > 0 ? data[i - 1] : data[i],
+            prev: i > 0 ? data[i - 1] : data[i],
         })).reverse();
 
         body.innerHTML = rows.map((row) => {
-            const change = ((row.value - row.prev) / row.prev) * 100;
+            // Werte in aktive Waehrung umrechnen
+            const val = convertFromCHF(row.value, currentCurrency) || row.value;
+            const prev = convertFromCHF(row.prev, currentCurrency) || row.prev;
+            const change = ((val - prev) / prev) * 100;
             const isAlarm = row.value < 11000 || change < -3;
             const status = isAlarm ? "ALARM" : "OK";
-            const badge  = isAlarm ? "badge-alarm" : "badge-ok";
-            const arrow  = change >= 0 ? "▲" : "▼";
+            const badge = isAlarm ? "badge-alarm" : "badge-ok";
+            const arrow = change >= 0 ? "\u25B2" : "\u25BC";
             const trendCls = change >= 0 ? "trend-up" : "trend-down";
-
-            // Uhrzeit pseudo-zufaellig, aber stabil je Zeile (nur Demo).
             const hour = (9 + (rows.length - rows.indexOf(row))) % 24;
             const time = `${String(hour).padStart(2, "0")}:00:00`;
 
@@ -456,7 +446,7 @@
                 <tr>
                     <td>${row.label}</td>
                     <td>${time}</td>
-                    <td>${formatCHF(row.value)}</td>
+                    <td>${formatNumber(val)}</td>
                     <td class="${trendCls}">${arrow} ${change.toFixed(2)} %</td>
                     <td><span class="badge ${badge}">${status}</span></td>
                 </tr>
@@ -465,32 +455,29 @@
     }
 
     /* ---------------------------------------------------------------------
-       10) NAECHSTER SCAN: FORTSCHRITTSBALKEN
+       13) NAECHSTER SCAN: FORTSCHRITTSBALKEN
        --------------------------------------------------------------------- */
     const progressFill = document.getElementById("scan-progress");
     const nextScanEta  = document.getElementById("next-scan-eta");
-
-    const SCAN_INTERVAL_S = 300;       // 5 Minuten als Demo-Zyklus
-    let   scanStart       = Date.now();
+    const SCAN_INTERVAL_S = 300;
+    let scanStart = Date.now();
 
     function updateProgress() {
         const elapsed = (Date.now() - scanStart) / 1000;
-        const ratio   = Math.min(1, elapsed / SCAN_INTERVAL_S);
+        const ratio = Math.min(1, elapsed / SCAN_INTERVAL_S);
         progressFill.style.width = (ratio * 100).toFixed(2) + "%";
-
         const remaining = Math.max(0, SCAN_INTERVAL_S - elapsed);
         const m = Math.floor(remaining / 60);
         const s = Math.floor(remaining % 60);
         nextScanEta.textContent =
             `in ${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-
-        if (ratio >= 1) scanStart = Date.now();   // Reset
+        if (ratio >= 1) scanStart = Date.now();
     }
     updateProgress();
     setInterval(updateProgress, 1000);
 
     /* ---------------------------------------------------------------------
-       11) "SCAN JETZT AUSLOESEN"-BUTTON
+       14) "SCAN JETZT AUSLOESEN"-BUTTON
        --------------------------------------------------------------------- */
     const scanBtn = document.getElementById("scan-now-btn");
 
@@ -499,30 +486,23 @@
         const icon = scanBtn.querySelector(".btn-icon");
         icon.classList.add("spin");
         const original = scanBtn.lastChild.textContent;
-        scanBtn.lastChild.textContent = " Scan läuft ...";
+        scanBtn.lastChild.textContent = " Scan laeuft ...";
 
-        // Simulation: 2.4 Sekunden "scannen", dann Erfolg.
         await sleep(2400);
-
-        // Tabelle neu rendern (frische Random-Daten als sichtbares Feedback).
         renderRunsTable();
         if (chart) {
-            const active = document.querySelector(".chip-active");
-            buildChart(parseInt(active.dataset.range, 10));
+            const active = document.querySelector(".chip[data-range].chip-active");
+            if (active) buildChart(parseInt(active.dataset.range, 10));
         }
-        // Fortschritt zuruecksetzen.
         scanStart = Date.now();
-
         icon.classList.remove("spin");
         scanBtn.lastChild.textContent = original;
         scanBtn.disabled = false;
-
         showToast("Scan abgeschlossen - Daten aktualisiert.", "success");
     });
 
     /* ---------------------------------------------------------------------
-       12) DEMO-BUTTON: TEST-MAIL VERSAND
-       TODO: DEMO BUTTON — vor Abgabe entfernen
+       15) TEST-MAIL-BUTTON
        --------------------------------------------------------------------- */
     const demoEmailBtn = document.getElementById("demo-email-btn");
     const demoBtnIcon  = document.getElementById("demo-btn-icon");
@@ -531,17 +511,14 @@
     if (demoEmailBtn) {
         demoEmailBtn.addEventListener("click", async () => {
             const saved = localStorage.getItem(STORAGE_KEY);
-
-            // Keine Adresse hinterlegt -> Modal oeffnen, statt zu senden.
             if (!saved) {
                 showToast("Bitte zuerst eine E-Mail-Adresse hinterlegen.", "error");
                 openModal();
                 return;
             }
 
-            // Lade-Animation: Icon dreht sich, Label aendert sich.
             demoEmailBtn.disabled = true;
-            demoBtnIcon.textContent = "⏳";
+            demoBtnIcon.textContent = "\u23F3";
             demoBtnIcon.classList.add("spin");
             demoBtnLabel.textContent = "Sende Test-Mail ...";
 
@@ -551,26 +528,192 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ email: saved }),
                 });
-
                 const ct = res.headers.get("content-type") || "";
                 const data = ct.includes("application/json")
                     ? await res.json()
                     : { success: false, error: `HTTP ${res.status}` };
-
                 if (!res.ok || !data.success) {
                     throw new Error(data.error || `HTTP ${res.status}`);
                 }
-
-                showToast("Test-Mail gesendet! Prüfe dein Postfach.", "success");
+                showToast("Test-Mail gesendet! Pruefe dein Postfach.", "success");
             } catch (err) {
-                console.error("Demo-Mail-Versand fehlgeschlagen:", err);
+                console.error("Test-Mail-Versand fehlgeschlagen:", err);
                 showToast("Fehler beim Senden: " + (err.message || err), "error");
             } finally {
                 demoEmailBtn.disabled = false;
                 demoBtnIcon.classList.remove("spin");
-                demoBtnIcon.textContent = "🧪";
-                demoBtnLabel.textContent = "Demo: Test-Mail senden";
+                demoBtnIcon.textContent = "\uD83E\uDDEA";
+                demoBtnLabel.textContent = "Test-Mail senden";
             }
         });
     }
+
+    /* ---------------------------------------------------------------------
+       16) SIMULATIONS-TRADING (Feature 1)
+           Live-Kurse alle 3 Sekunden aktualisieren, Kaufen/Verkaufen,
+           Portfolio-Wert berechnen, Trade-Historie anzeigen.
+       --------------------------------------------------------------------- */
+    const simPanel     = document.getElementById("sim-panel");
+    const simPriceBtc  = document.getElementById("sim-price-btc");
+    const simPriceEth  = document.getElementById("sim-price-eth");
+    const simChangeBtc = document.getElementById("sim-change-btc");
+    const simChangeEth = document.getElementById("sim-change-eth");
+    const simBalance   = document.getElementById("sim-balance");
+    const simPortfolio = document.getElementById("sim-portfolio");
+    const simHoldBtc   = document.getElementById("sim-hold-btc");
+    const simHoldEth   = document.getElementById("sim-hold-eth");
+    const simAmount    = document.getElementById("sim-amount");
+    const simTradesBody = document.getElementById("sim-trades-body");
+
+    let lastSimPrices = {};
+    let simInterval = null;
+
+    function showSimPanel(show) {
+        if (simPanel) simPanel.hidden = !show;
+    }
+
+    async function refreshSimPrices() {
+        try {
+            const res = await fetch("/api/sim/prices", { cache: "no-store" });
+            if (!res.ok) return;
+            const data = await res.json();
+
+            // Kurse anzeigen
+            if (data.prices) {
+                const btcPrice = data.prices.bitcoin || 0;
+                const ethPrice = data.prices.ethereum || 0;
+
+                // Aenderungen berechnen
+                if (lastSimPrices.bitcoin) {
+                    const btcDelta = ((btcPrice - lastSimPrices.bitcoin) / lastSimPrices.bitcoin * 100);
+                    simChangeBtc.textContent = (btcDelta >= 0 ? "\u25B2 +" : "\u25BC ") + btcDelta.toFixed(2) + " %";
+                    simChangeBtc.style.color = btcDelta >= 0 ? "var(--success)" : "var(--danger)";
+                }
+                if (lastSimPrices.ethereum) {
+                    const ethDelta = ((ethPrice - lastSimPrices.ethereum) / lastSimPrices.ethereum * 100);
+                    simChangeEth.textContent = (ethDelta >= 0 ? "\u25B2 +" : "\u25BC ") + ethDelta.toFixed(2) + " %";
+                    simChangeEth.style.color = ethDelta >= 0 ? "var(--success)" : "var(--danger)";
+                }
+
+                simPriceBtc.textContent = formatNumber(btcPrice) + " CHF";
+                simPriceEth.textContent = formatNumber(ethPrice) + " CHF";
+                lastSimPrices = data.prices;
+            }
+
+            // Portfolio-Uebersicht
+            simBalance.textContent = formatNumber(data.balance_chf || 0) + " CHF";
+            simPortfolio.textContent = formatNumber(data.portfolio_value || 0) + " CHF";
+
+            // P/L Farbe
+            const pv = data.portfolio_value || 0;
+            simPortfolio.style.color = pv >= 100 ? "var(--success)" : "var(--danger)";
+
+            // Holdings
+            const btcHold = data.holdings?.bitcoin?.amount || 0;
+            const ethHold = data.holdings?.ethereum?.amount || 0;
+            simHoldBtc.textContent = btcHold > 0 ? btcHold.toFixed(6) + " BTC" : "0";
+            simHoldEth.textContent = ethHold > 0 ? ethHold.toFixed(6) + " ETH" : "0";
+
+        } catch (err) {
+            // Stille Toleranz
+        }
+    }
+
+    async function executeTrade(action, coin) {
+        const amountStr = simAmount?.value || "10";
+        const amount = parseFloat(amountStr);
+        if (!Number.isFinite(amount) || amount <= 0) {
+            showToast("Bitte einen gueltigen Betrag eingeben.", "error");
+            return;
+        }
+
+        // Buttons waehrend Trade deaktivieren
+        document.querySelectorAll(".btn-sim-buy, .btn-sim-sell")
+            .forEach(b => b.disabled = true);
+
+        try {
+            const res = await fetch("/api/paper/trade", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action, coin, amount_chf: amount }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                throw new Error(data.error || "Trade fehlgeschlagen");
+            }
+            showToast(data.message, "success");
+            // Sofort aktualisieren
+            await refreshSimPrices();
+            renderTradeHistory(data.depot?.trades || []);
+        } catch (err) {
+            showToast(err.message || "Trade-Fehler", "error");
+        } finally {
+            document.querySelectorAll(".btn-sim-buy, .btn-sim-sell")
+                .forEach(b => b.disabled = false);
+        }
+    }
+
+    function renderTradeHistory(trades) {
+        if (!simTradesBody) return;
+        const rows = [...trades].reverse().slice(0, 20);
+        simTradesBody.innerHTML = rows.map(t => {
+            const time = new Date(t.timestamp).toLocaleTimeString("de-CH", {
+                hour: "2-digit", minute: "2-digit", second: "2-digit"
+            });
+            const label = t.coin === "bitcoin" ? "BTC" : "ETH";
+            const actionBadge = t.action === "buy"
+                ? '<span class="badge badge-ok">KAUF</span>'
+                : '<span class="badge badge-alarm">VERKAUF</span>';
+            return `<tr>
+                <td>${time}</td>
+                <td>${actionBadge}</td>
+                <td>${label}</td>
+                <td>${t.coin_amount?.toFixed(6) || "—"}</td>
+                <td>${formatNumber(t.price_chf)}</td>
+                <td>${formatNumber(t.total_chf)}</td>
+            </tr>`;
+        }).join("");
+    }
+
+    // Trade-Buttons Event-Listener
+    ["sim-buy-btc", "sim-sell-btc", "sim-buy-eth", "sim-sell-eth"].forEach(id => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        const [, action, coin] = id.split("-");
+        const coinMap = { btc: "bitcoin", eth: "ethereum" };
+        btn.addEventListener("click", () => executeTrade(action, coinMap[coin]));
+    });
+
+    // Simulation starten/stoppen bei Modus-Wechsel
+    function startSimulation() {
+        showSimPanel(true);
+        refreshSimPrices();
+        // Bestehende Trade-Historie laden
+        fetch("/api/paper", { cache: "no-store" })
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d?.trades) renderTradeHistory(d.trades); })
+            .catch(() => {});
+        if (!simInterval) {
+            simInterval = setInterval(refreshSimPrices, 3000);
+        }
+    }
+
+    function stopSimulation() {
+        showSimPanel(false);
+        if (simInterval) {
+            clearInterval(simInterval);
+            simInterval = null;
+        }
+    }
+
+    // Mode-Watcher: Simulation starten wenn Modus wechselt
+    const _origRefreshMode = refreshMode;
+    refreshMode = async function() {
+        await _origRefreshMode();
+        if (currentMode === "simulation") {
+            startSimulation();
+        } else {
+            stopSimulation();
+        }
+    };
 })();

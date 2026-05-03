@@ -47,17 +47,73 @@ DEPOTGUARD_PATH = os.path.join(SCRIPT_DIR, "depotguard.sh")
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
 CREDENTIALS_GPG_PATH = os.path.join(SCRIPT_DIR, "credentials.json.gpg")  # Feature 2
 RECIPIENT_PATH = os.path.join(SCRIPT_DIR, "recipient.json")   # Empfaenger-Mail (Single Source of Truth)
-MODE_PATH = os.path.join(SCRIPT_DIR, "mode.json")             # live/demo (Feature 1)
+MODE_PATH = os.path.join(SCRIPT_DIR, "mode.json")             # live/simulation/readonly (Feature 1)
 FX_PATH = os.path.join(SCRIPT_DIR, "fx_cache.json")           # FX-Rates (Feature 3)
+PAPER_DEPOT_PATH = os.path.join(SCRIPT_DIR, "paper_depot.json")  # Paper-Trading (Feature 1)
 
-# Erlaubte Modi - jede andere Eingabe wird zu "live" normalisiert (Default).
-VALID_MODES = ("live", "demo")
+# Erlaubte Modi - nur noch LIVE und SIMULATION.
+VALID_MODES = ("live", "simulation")
 
 # FX (Feature 3): server.py uebernimmt den eigentlichen Abruf, depotguard.sh
 # nutzt denselben Cache nur defensiv. open.er-api.com benoetigt keinen Key.
 FX_API_URL = "https://open.er-api.com/v6/latest/USD"
 FX_CACHE_MAX_AGE_S = 12 * 3600     # 12 Stunden - FX bewegt sich kaum
 FX_FETCH_TIMEOUT_S = 8
+
+# ---------------------------------------------------------------------------
+# Simulations-Modus (Feature 1): Echte Krypto-Kurse von CoinGecko
+# ---------------------------------------------------------------------------
+import random
+import time as _time
+import urllib.request
+import urllib.error
+
+PRICE_CACHE_PATH = os.path.join(SCRIPT_DIR, "price_cache.json")
+COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=chf"
+
+_sim_prices = {}       # {"bitcoin": 95000.0, "ethereum": 3200.0}
+_sim_last_update = 0.0
+_SIM_UPDATE_INTERVAL = 30  # Sekunden zwischen echten API-Abrufen
+
+
+def get_sim_prices():
+    """Liefert echte BTC/ETH-Preise in CHF von CoinGecko.
+    Kurse werden alle 30 Sekunden aktualisiert. Bei API-Fehler wird
+    auf den lokalen price_cache.json zurueckgegriffen."""
+    global _sim_prices, _sim_last_update
+    now = _time.time()
+
+    if _sim_prices and (now - _sim_last_update) < _SIM_UPDATE_INTERVAL:
+        return dict(_sim_prices)
+
+    # Versuch 1: Live von CoinGecko
+    try:
+        req = urllib.request.Request(COINGECKO_URL, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        _sim_prices = {
+            "bitcoin": float(data.get("bitcoin", {}).get("chf", 0)),
+            "ethereum": float(data.get("ethereum", {}).get("chf", 0)),
+        }
+        _sim_last_update = now
+        return dict(_sim_prices)
+    except Exception:
+        pass
+
+    # Versuch 2: Lokaler Cache
+    if not _sim_prices:
+        try:
+            with open(PRICE_CACHE_PATH, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            _sim_prices = {
+                "bitcoin": float(cache.get("bitcoin", {}).get("chf", 95000)),
+                "ethereum": float(cache.get("ethereum", {}).get("chf", 3200)),
+            }
+        except Exception:
+            _sim_prices = {"bitcoin": 95000.0, "ethereum": 3200.0}
+        _sim_last_update = now
+
+    return dict(_sim_prices)  # Kopie zurueckgeben
 
 # Local-First / API-Kontingent:
 # Tagesaktuelle Snapshots schreibt depotguard.sh nach SCRIPT_DIR/depot_YYYY-MM-DD.json.
@@ -420,6 +476,8 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
             self._handle_save_smtp()
         elif self.path == "/send_test_email":
             self._handle_send_test_email()
+        elif self.path == "/api/paper/trade":
+            self._handle_paper_trade()
         else:
             self._respond_json(404, False, "Endpunkt nicht gefunden.")
 
@@ -441,6 +499,12 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/fx":
             self._handle_get_fx()
+            return
+        if self.path == "/api/paper":
+            self._handle_get_paper()
+            return
+        if self.path == "/api/sim/prices":
+            self._handle_get_sim_prices()
             return
         super().do_GET()
 
@@ -500,7 +564,7 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
     # ---------- /api/mode ---------------------------------------------------
     def _handle_get_mode(self):
         """Liefert den aktuellen Lauf-Modus (Feature 1) als JSON.
-        Format: {"mode": "live"|"demo", "set_at": "...", "source": "..."}.
+        Format: {"mode": "live"|"simulation"|"readonly", "set_at": "...", "source": "..."}.
 
         Quelle ist primaer die Environment-Variable DEPOT_MODE
         (von depotguard.sh beim Server-Start gesetzt), als Fallback
@@ -557,6 +621,201 @@ class DepotTrackerHandler(SimpleHTTPRequestHandler):
         state = read_quota_state()
         state["remaining"] = max(0, state["limit"] - state["count"])
         payload = json.dumps(state, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    # ---------- /api/paper ---------------------------------------------------
+    def _handle_get_paper(self):
+        """Liefert die Daten aus paper_depot.json (Feature 1: Simulations-Modus).
+        Im Nicht-Simulations-Modus wird 404 zurueckgegeben."""
+        mode_state = read_mode_state()
+        if mode_state.get("mode") != "simulation":
+            self._respond_json(
+                404, False,
+                "Paper-Depot nur im SIMULATION-Modus verfuegbar.",
+            )
+            return
+        if not os.path.isfile(PAPER_DEPOT_PATH):
+            self._respond_json(
+                404, False,
+                "paper_depot.json noch nicht vorhanden - bitte depotguard.sh im Simulations-Modus starten.",
+            )
+            return
+        try:
+            with open(PAPER_DEPOT_PATH, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as exc:
+            self._respond_json(500, False, "paper_depot.json nicht lesbar: %s" % exc)
+            return
+        payload = content.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    # ---------- /api/sim/prices ----------------------------------------------
+    def _handle_get_sim_prices(self):
+        """Liefert simulierte BTC/ETH-Kurse in CHF (Feature 1).
+        Kurse aendern sich alle paar Sekunden um kleine Betraege."""
+        mode_state = read_mode_state()
+        if mode_state.get("mode") != "simulation":
+            self._respond_json(404, False, "Simulierte Kurse nur im SIMULATION-Modus.")
+            return
+        prices = get_sim_prices()
+        # Gesamtwert des Paper-Depots berechnen
+        portfolio_value = 0.0
+        balance_chf = 0.0
+        holdings = {}
+        try:
+            with open(PAPER_DEPOT_PATH, "r", encoding="utf-8") as f:
+                depot = json.load(f)
+            balance_chf = float(depot.get("balance_chf", 0))
+            holdings = depot.get("holdings", {})
+            portfolio_value = balance_chf
+            for coin, info in holdings.items():
+                amt = float(info.get("amount", 0))
+                price = prices.get(coin, 0)
+                portfolio_value += amt * price
+        except Exception:
+            pass
+        result = {
+            "prices": prices,
+            "balance_chf": round(balance_chf, 2),
+            "holdings": holdings,
+            "portfolio_value": round(portfolio_value, 2),
+        }
+        payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    # ---------- /api/paper/trade ---------------------------------------------
+    def _handle_paper_trade(self):
+        """Kauft oder verkauft Krypto im Paper-Depot (Feature 1).
+        Body: {"action": "buy"|"sell", "coin": "bitcoin"|"ethereum",
+               "amount_chf": 10.00}"""
+        mode_state = read_mode_state()
+        if mode_state.get("mode") != "simulation":
+            self._respond_json(403, False, "Trading nur im SIMULATION-Modus.")
+            return
+
+        data, err = self._read_json()
+        if err:
+            self._respond_json(400, False, err)
+            return
+
+        action = (data.get("action") or "").strip().lower()
+        coin = (data.get("coin") or "").strip().lower()
+        try:
+            amount_chf = float(data.get("amount_chf", 0))
+        except (TypeError, ValueError):
+            self._respond_json(400, False, "Ungueltiger Betrag.")
+            return
+
+        if action not in ("buy", "sell"):
+            self._respond_json(400, False, "action muss 'buy' oder 'sell' sein.")
+            return
+        if coin not in ("bitcoin", "ethereum"):
+            self._respond_json(400, False, "coin muss 'bitcoin' oder 'ethereum' sein.")
+            return
+        if amount_chf <= 0:
+            self._respond_json(400, False, "Betrag muss groesser als 0 sein.")
+            return
+
+        # Paper-Depot laden
+        if not os.path.isfile(PAPER_DEPOT_PATH):
+            self._respond_json(404, False, "paper_depot.json nicht vorhanden.")
+            return
+        try:
+            with open(PAPER_DEPOT_PATH, "r", encoding="utf-8") as f:
+                depot = json.load(f)
+        except Exception as exc:
+            self._respond_json(500, False, "paper_depot.json nicht lesbar: %s" % exc)
+            return
+
+        prices = get_sim_prices()
+        price = prices.get(coin, 0)
+        if price <= 0:
+            self._respond_json(500, False, "Kein Kurs fuer %s verfuegbar." % coin)
+            return
+
+        balance = float(depot.get("balance_chf", 0))
+        holdings = depot.get("holdings", {})
+        trades = depot.get("trades", [])
+        coin_label = "BTC" if coin == "bitcoin" else "ETH"
+
+        if action == "buy":
+            if amount_chf > balance:
+                self._respond_json(400, False,
+                    "Nicht genuegend Guthaben (%.2f CHF verfuegbar)." % balance)
+                return
+            coin_amount = amount_chf / price
+            balance -= amount_chf
+            if coin not in holdings:
+                holdings[coin] = {"amount": 0.0, "avg_price_chf": price}
+            old_amt = holdings[coin]["amount"]
+            old_avg = holdings[coin].get("avg_price_chf", price)
+            new_amt = old_amt + coin_amount
+            # Gewichteten Durchschnittspreis aktualisieren
+            if new_amt > 0:
+                holdings[coin]["avg_price_chf"] = round(
+                    (old_avg * old_amt + price * coin_amount) / new_amt, 2)
+            holdings[coin]["amount"] = round(new_amt, 8)
+            msg = "%.6f %s gekauft fuer %.2f CHF" % (coin_amount, coin_label, amount_chf)
+
+        else:  # sell
+            if coin not in holdings or holdings[coin]["amount"] <= 0:
+                self._respond_json(400, False, "Keine %s-Holdings vorhanden." % coin_label)
+                return
+            coin_amount = amount_chf / price
+            available = holdings[coin]["amount"]
+            if coin_amount > available:
+                coin_amount = available
+                amount_chf = coin_amount * price
+            balance += amount_chf
+            holdings[coin]["amount"] = round(available - coin_amount, 8)
+            if holdings[coin]["amount"] < 1e-8:
+                del holdings[coin]
+            msg = "%.6f %s verkauft fuer %.2f CHF" % (coin_amount, coin_label, amount_chf)
+
+        # Trade protokollieren
+        from datetime import datetime
+        trades.append({
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "coin": coin,
+            "coin_amount": round(coin_amount, 8),
+            "price_chf": round(price, 2),
+            "total_chf": round(amount_chf, 2),
+        })
+
+        # Paper-Depot speichern
+        depot["balance_chf"] = round(balance, 2)
+        depot["holdings"] = holdings
+        depot["trades"] = trades
+        try:
+            import tempfile
+            d = os.path.dirname(PAPER_DEPOT_PATH) or "."
+            fd, tmp = tempfile.mkstemp(prefix="paper_depot.", suffix=".tmp", dir=d)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(depot, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp, PAPER_DEPOT_PATH)
+        except Exception as exc:
+            self._respond_json(500, False, "Speicherfehler: %s" % exc)
+            return
+
+        result = {"success": True, "message": msg, "depot": depot, "prices": prices}
+        payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
