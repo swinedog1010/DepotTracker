@@ -21,10 +21,12 @@
 <body>
 
     <!-- ====================================================================
-         E-MAIL MODAL (oeffnet sich beim ersten Besuch automatisch)
-         Einziger Schritt: Empfaenger-Adresse. Absender-Daten sind fest im
-         Backend (depotguard.sh / credentials.json) hinterlegt und werden
-         im Frontend bewusst nicht mehr abgefragt.
+         E-MAIL MODAL (Öffnet sich beim ersten Besuch automatisch)
+         Dieses Modal fragt den Benutzer nach seiner E-Mail-Adresse. 
+         Der eingegebene Wert wird im LocalStorage gespeichert und an 
+         das Backend gesendet, um Benachrichtigungen zu ermöglichen.
+         Die Absender-Daten sind sicher im Backend (credentials.json) 
+         hinterlegt und werden hier nicht benötigt.
          ==================================================================== -->
     <div id="email-modal" class="modal-overlay" aria-hidden="true">
         <div class="modal-card" role="dialog" aria-labelledby="modal-title">
@@ -67,6 +69,10 @@
 
     <!-- ====================================================================
          HEADER / NAVIGATION
+         Beinhaltet das Logo, den Titel und verschiedene Status-Indikatoren.
+         - mode-badge: Zeigt an, ob die App im LIVE, SIMULATION oder READ-ONLY Modus ist.
+         - enc-badge: Zeigt an, ob das Backend GPG-Verschlüsselung nutzt.
+         - status-indicator: Zeigt den generellen Systemstatus an (z.B. OK oder Fehler).
          ==================================================================== -->
     <header class="app-header">
         <div class="brand">
@@ -105,7 +111,10 @@
          ==================================================================== -->
     <main class="app-main">
 
-        <!-- Waehrungs-Umschalter (Feature 3: Multi-Currency) --------------- -->
+        <!-- Waehrungs-Umschalter (Feature 3: Multi-Currency) ---------------
+             Ermöglicht dem Benutzer, die Anzeigewährung des Portfolios 
+             zwischen CHF, USD, EUR und GBP dynamisch umzuschalten. Die Werte 
+             werden per JavaScript umgerechnet. -->
         <section class="currency-switcher" aria-label="Waehrung waehlen">
             <span class="currency-label">Waehrung:</span>
             <div class="currency-chips">
@@ -116,7 +125,13 @@
             </div>
         </section>
 
-        <!-- Statistik-Karten ---------------------------------------------- -->
+        <!-- Statistik-Karten ---------------------------------------------- 
+             Zeigt die wichtigsten KPIs des Portfolios an:
+             - Aktueller Depotwert (mit Live-Update via WebSocket)
+             - Allzeithoch (ATH) basierend auf ath.txt
+             - Verlust vom ATH in Prozent
+             - Anzahl der Alarme der letzten 30 Tage
+             ------------------------------------------------------------------- -->
         <section class="cards-grid" aria-label="Kennzahlen">
             <article class="card card-accent">
                 <span class="card-label">Aktueller Depotwert</span>
@@ -143,7 +158,12 @@
             </article>
         </section>
 
-        <!-- Chart + Depot-Composition ------------------------------------- -->
+        <!-- Chart + Depot-Composition ------------------------------------- 
+             Diese Sektion beinhaltet:
+             - Einen interaktiven Chart.js Verlaufsgraphen mit Zeitfiltern (7T, 30T, 90T)
+             - Die visuelle Zusammensetzung des Depots (Krypto-Anteile in Prozent)
+             - Eine Fortschrittsanzeige für den nächsten automatischen Scan
+             ------------------------------------------------------------------- -->
         <section class="grid-two">
             <div class="panel panel-large">
                 <header class="panel-header">
@@ -284,7 +304,11 @@
             </details>
         </section>
 
-        <!-- Letzte Laeufe (Tabelle) --------------------------------------- -->
+        <!-- Letzte Laeufe (Tabelle) --------------------------------------- 
+             Eine tabellarische Übersicht der historischen Depot-Werte.
+             Die Daten werden asynchron aus der history.csv geladen und 
+             hier dynamisch als HTML-Tabellenzeilen eingefügt.
+             ------------------------------------------------------------------- -->
         <section class="panel">
             <header class="panel-header">
                 <h2>Letzte Laeufe</h2>

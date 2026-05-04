@@ -39,6 +39,12 @@
        --------------------------------------------------------------------- */
     const toastContainer = document.getElementById("toast-container");
 
+    /**
+     * Zeigt eine Toast-Benachrichtigung am unteren Bildschirmrand an.
+     * @param {string} message - Die anzuzeigende Nachricht.
+     * @param {string} [type="success"] - Typ der Benachrichtigung ("success", "error", etc.).
+     * @param {number} [duration=3500] - Anzeigedauer in Millisekunden.
+     */
     function showToast(message, type = "success", duration = 3500) {
         const toast = document.createElement("div");
         toast.className = `toast toast-${type}`;
@@ -62,6 +68,10 @@
 
     const STORAGE_KEY = "depottracker.email";
 
+    /**
+     * Öffnet das E-Mail-Modal, um den Benutzer nach seiner Adresse zu fragen.
+     * @param {string} [prefill] - Eine optional voreingestellte E-Mail-Adresse.
+     */
     function openModal(prefill) {
         const saved = prefill || localStorage.getItem(STORAGE_KEY) || "";
         if (saved) emailInput.value = saved;
@@ -76,6 +86,10 @@
         modal.setAttribute("aria-hidden", "true");
     }
 
+    /**
+     * Prüft, ob bereits eine E-Mail-Adresse auf dem Server (via /api/recipient)
+     * oder im LocalStorage hinterlegt ist. Falls nicht, öffnet sich das Modal.
+     */
     async function maybeOpenModal() {
         try {
             const res = await fetch("/api/recipient", { cache: "no-store" });
@@ -149,6 +163,10 @@
     const VALID_MODES = ["live", "simulation"];
     const MODE_LABELS = { "live": "LIVE", "simulation": "SIMULATION" };
 
+    /**
+     * Ruft den aktuellen Modus (live, simulation, readonly) vom Backend ab 
+     * und aktualisiert die entsprechenden UI-Badges und Modus-Variablen.
+     */
     async function refreshMode() {
         try {
             const res = await fetch("/api/mode", { cache: "no-store" });
@@ -188,6 +206,12 @@
           kostet 1 USD". Umrechnung: targetValue = chfValue / rates.CHF * rates.TARGET
        --------------------------------------------------------------------- */
 
+    /**
+     * Rechnet einen Schweizer Franken (CHF) Betrag in die gewünschte Zielwährung um.
+     * @param {number} chfValue - Der umzurechnende CHF-Betrag.
+     * @param {string} targetCurrency - Die Zielwährung (z.B. "USD", "EUR").
+     * @returns {number|null} Der umgerechnete Betrag oder null bei Fehler.
+     */
     function convertFromCHF(chfValue, targetCurrency) {
         if (targetCurrency === "CHF") return chfValue;
         const chfPerUsd = fxRates.CHF;
@@ -213,6 +237,10 @@
         if (tableCurrencyEl) tableCurrencyEl.textContent = currentCurrency;
     }
 
+    /**
+     * Ruft die aktuellen Wechselkurse (FX) vom Backend ab, aktualisiert
+     * die globalen `fxRates` und stößt die Neu-Berechnung der Werte an.
+     */
     async function refreshFx() {
         try {
             const res = await fetch("/api/fx", { cache: "no-store" });
@@ -251,6 +279,11 @@
     /* ---------------------------------------------------------------------
        7) COUNTER-ANIMATIONEN
        --------------------------------------------------------------------- */
+    /**
+     * Animiert das Hochzählen einer Zahl (Counter) innerhalb eines HTML-Elements.
+     * Nutzt `requestAnimationFrame` für flüssige Übergänge.
+     * @param {HTMLElement} el - Das HTML-Element mit den `data-target` und `data-suffix` Attributen.
+     */
     function animateCounter(el) {
         const target = parseFloat(el.dataset.target);
         const suffix = el.dataset.suffix || "";
@@ -326,6 +359,10 @@
        --------------------------------------------------------------------- */
     let chart;
 
+    /**
+     * Erstellt und rendert das Chart.js Diagramm für den Depot-Verlauf.
+     * @param {number} range - Die Anzahl der anzuzeigenden Tage (z.B. 7, 30, 90).
+     */
     function buildChart(range) {
         const { labels, data: rawData } = generateHistory(range);
         // Daten in aktive Waehrung umrechnen
@@ -419,6 +456,10 @@
     /* ---------------------------------------------------------------------
        12) TABELLE "LETZTE LAEUFE"
        --------------------------------------------------------------------- */
+    /**
+     * Generiert und rendert die Tabellenzeilen der "Letzten Läufe".
+     * Rechnet die simulierten CHF-Werte automatisch in die aktive Währung um.
+     */
     function renderRunsTable() {
         const body = document.getElementById("runs-body");
         const { labels, data } = generateHistory(8);
@@ -619,6 +660,11 @@
         }
     }
 
+    /**
+     * Führt einen simulierten Trade (Kauf/Verkauf) im Paper-Trading Modus durch.
+     * @param {string} action - "buy" oder "sell".
+     * @param {string} coin - Die Kryptowährung (z.B. "bitcoin", "ethereum").
+     */
     async function executeTrade(action, coin) {
         const amountStr = simAmount?.value || "10";
         const amount = parseFloat(amountStr);
