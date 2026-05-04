@@ -80,20 +80,45 @@ fail() { printf "%b[FEHLER]%b  %s\n"   "$C_RED"    "$C_RESET" "$*" >&2; exit 1; 
 # Ohne TTY (Cron, CI) wird ebenfalls automatisch mit Y beantwortet, damit
 # nicht-interaktive Setups durchlaufen.
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# [Y/n]-Helper. Default: Y. ASSUME_YES=1 ueberspringt jede Abfrage.
+# Ohne TTY (Cron, CI) wird ebenfalls automatisch mit Y beantwortet, damit
+# nicht-interaktive Setups durchlaufen.
+# -----------------------------------------------------------------------------
 ask_yes_no() {
+    # Speichere die übergebene Frage in einer lokalen Variable
     local question="$1"
+    
+    # Prüfe ob das Flag für "--yes" (alle Fragen automatisch mit Ja beantworten) gesetzt ist
     if (( ASSUME_YES == 1 )); then
+        # Gib die Frage und die automatische Antwort aus
         printf "%s [Y/n] (auto-yes)\n" "$question"
+        # Gib 0 (wahr/Erfolg) zurück, was einem "Ja" entspricht
         return 0
     fi
+    
+    # Prüfe, ob wir NICHT in einem echten Terminal (TTY) sind (z.B. Cronjob)
     if [[ ! -t 0 && ! -e /dev/tty ]]; then
+        # Ohne Terminal kann der User nichts eingeben, also wird standardmäßig "Ja" angenommen
         printf "%s [Y/n] (no TTY, default Y)\n" "$question"
+        # Gib 0 (wahr) zurück
         return 0
     fi
+    
+    # Leere die Variable für die Benutzerantwort
     local ans=""
+    # Drucke die Frage und erwarte eine Eingabe auf demselben Zeilen-Ende
     printf "%s [Y/n] " "$question"
+    
+    # Lies eine Zeile vom Terminal (/dev/tty) ein; falls das fehlschlägt, setze Antwort auf "Y"
     IFS= read -r ans </dev/tty || ans="Y"
+    
+    # Falls die Eingabe komplett leer war (User hat nur Enter gedrückt), verwende Default "Y"
     ans="${ans:-Y}"
+    
+    # Regex-Check: Beginnt die Eingabe mit y, Y, j oder J?
+    # Der Exit-Code dieses Regex-Matches ist gleichzeitig der Return-Wert der Funktion!
+    # (Erfolg = 0 für Ja, Fehler = 1 für Nein)
     [[ "$ans" =~ ^[YyJj]$ ]]
 }
 
@@ -134,13 +159,21 @@ if command -v apt-get >/dev/null 2>&1; then
 fi
 
 apt_install() {
-    # apt_install <pkg> [<pkg>...]
+    # Funktion apt_install <pkg> [<pkg>...]
+    # Definiert noninteractive Umgebung, um störende Dialogfenster von apt-get zu blockieren
+    # Führt apt-get update durch (-y für auto-yes). Leitet Standardausgabe und Fehler nach /dev/null um
+    # '|| true' stellt sicher, dass ein Fehler beim Update den Prozess nicht hart abbricht
     DEBIAN_FRONTEND=noninteractive $SUDO apt-get update -y >/dev/null 2>&1 || true
+    
+    # Installiert die angeforderten Pakete ("$@" gibt alle übergebenen Argumente weiter)
     DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y "$@"
 }
 
 dpkg_installed() {
-    # dpkg_installed <pkg> -> 0 wenn installiert
+    # dpkg_installed <pkg> -> gibt Exit-Code 0 (wahr) zurück, wenn installiert
+    # dpkg-query fragt den Paketstatus ab, -W listet Status auf, -f formatiert die Ausgabe
+    # Wir filtern die Ausgabe nach "install ok installed", um zu prüfen, ob es sauber installiert ist
+    # grep -q liefert 0 zurück wenn der String gefunden wurde, sonst 1
     dpkg-query -W -f='${Status}\n' "$1" 2>/dev/null \
         | grep -q "install ok installed"
 }
